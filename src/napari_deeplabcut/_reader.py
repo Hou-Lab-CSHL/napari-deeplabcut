@@ -115,8 +115,9 @@ def _populate_metadata(
     likelihood: Optional[Sequence[float]] = None,
     paths: Optional[List[str]] = None,
     size: Optional[int] = 8,
-    pcutoff: Optional[float] = 0.6,
+    pcutoff: Optional[float] = 0.9,
     colormap: Optional[str] = "viridis",
+    generated: bool = False
 ) -> Dict:
     if labels is None:
         labels = header.bodyparts
@@ -124,6 +125,8 @@ def _populate_metadata(
         ids = header.individuals
     if likelihood is None:
         likelihood = np.ones(len(labels))
+    elif isinstance(likelihood, pd.Series):
+        likelihood = np.asarray(likelihood.values)
     face_color_cycle_maps = misc.build_color_cycles(header, colormap)
     face_color_prop = "id" if ids[0] else "label"
     return {
@@ -134,7 +137,9 @@ def _populate_metadata(
             "id": list(ids),
             "likelihood": likelihood,
             "valid": likelihood > pcutoff,
+            "generated": np.repeat(generated, len(labels))
         },
+        "shown": (likelihood > pcutoff) & ~generated,
         "face_color_cycle": face_color_cycle_maps[face_color_prop],
         "face_color": face_color_prop,
         "face_colormap": colormap,
@@ -225,7 +230,6 @@ def read_hdf(filename: str) -> List[LayerData]:
         metadata["metadata"]["name"] = metadata["name"]
         layers.append((data, metadata, "points"))
     return layers
-
 
 class Video:
     def __init__(self, video_path):

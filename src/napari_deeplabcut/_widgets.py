@@ -1,1419 +1,326 @@
-import os
-from collections import defaultdict, namedtuple
-from copy import deepcopy
-from datetime import datetime
-from functools import partial, cached_property
-from math import ceil, log10
-import matplotlib.pyplot as plt
-import matplotlib.style as mplstyle
-import napari
-import pandas as pd
-from pathlib import Path
-from types import MethodType
-from typing import Optional, Sequence, Union
-
-from matplotlib.backends.backend_qtagg import FigureCanvas, NavigationToolbar2QT
-
 import numpy as np
-from napari._qt.widgets.qt_welcome import QtWelcomeLabel
+from dataclasses import dataclass, replace
+from collections import deque
+from typing import Sequence, Optional
+from qtpy.QtCore import QObject, QTimer
+from qtpy.QtWidgets import (QWidget,
+                            QHBoxLayout,
+                            QVBoxLayout,
+                            QGroupBox,
+                            QButtonGroup,
+                            QRadioButton,
+                            QComboBox)
 from napari.layers import Image, Points, Shapes, Tracks
-from napari.layers.points._points_key_bindings import register_points_action
+from napari.utils.events import EventedModel, Selection
 from napari.layers.utils import color_manager
-from napari.layers.utils.layer_utils import _features_to_properties
-from napari.utils.events import Event
-from napari.utils.history import get_save_history, update_save_history
-from qtpy.QtCore import Qt, QTimer, Signal, QPoint, QSettings, QSize
-from qtpy.QtGui import QPainter, QAction, QCursor, QIcon
-from qtpy.QtSvgWidgets import QSvgWidget
-from qtpy.QtWidgets import (
-    QButtonGroup,
-    QCheckBox,
-    QComboBox,
-    QDialog,
-    QDialogButtonBox,
-    QFileDialog,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QPushButton,
-    QRadioButton,
-    QScrollArea,
-    QSizePolicy,
-    QSlider,
-    QStyle,
-    QStyleOption,
-    QVBoxLayout,
-    QWidget,
-)
 
-from napari_deeplabcut import keypoints
-from napari_deeplabcut._reader import _load_config
-from napari_deeplabcut._writer import _write_config, _write_image, _form_df
-from napari_deeplabcut.misc import (
-    encode_categories,
-    to_os_dir_sep,
-    guarantee_multiindex_rows,
-    build_color_cycles
-)
+from napari_deeplabcut.keypoints import (LabelMode,
+                                         LABEL_MODE_TOOLTIPS,
+                                         Keypoint,
+                                         KeypointStore)
 
 
-Tip = namedtuple("Tip", ["msg", "pos"])
-
-
-class Shortcuts(QDialog):
-    def __init__(self, parent):
-        super().__init__(parent=parent)
-        self.setParent(parent)
-        self.setWindowTitle("Shortcuts")
-
-        image_path = str(Path(__file__).parent / "assets" / "napari_shortcuts.svg")
-
-        vlayout = QVBoxLayout()
-        background_widget = QWidget()
-        background_widget.setStyleSheet("background-color: white;")
-        svg_widget = QSvgWidget(image_path)
-        vlayout.addWidget(background_widget)
-        vlayout.addWidget(svg_widget)
-        vlayout.setContentsMargins(0, 0, 0, 0)
-        self.setLayout(vlayout)
-
-
-class Tutorial(QDialog):
-    def __init__(self, parent):
-        super().__init__(parent=parent)
-        self.setParent(parent)
-        self.setWindowTitle("Tutorial")
-        self.setModal(True)
-        self.setStyleSheet("background:#361AE5")
-        self.setAttribute(Qt.WA_DeleteOnClose)
-        self.setWindowOpacity(0.95)
-        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
-
-        self._current_tip = 0
-        self._tips = [
-            Tip(
-                "Load a folder of annotated data\n(and optionally a config file if labeling from scratch)\nfrom the menu File > Open File or Open Folder.\nAlternatively, files and folders of images can be dragged\nand dropped onto the main window.",
-                (0.35, 0.15),
-            ),
-            Tip(
-                "Data layers will be listed at the bottom left;\ntheir visibility can be toggled by clicking on the small eye icon.",
-                (0.1, 0.65),
-            ),
-            Tip(
-                "Corresponding layer controls can be found at the top left.\nSwitch between labeling and selection mode using the numeric keys 2 and 3,\nor clicking on the + or -> icons.",
-                (0.1, 0.2),
-            ),
-            Tip(
-                "There are three keypoint labeling modes:\nthe key M can be used to cycle between them.",
-                (0.65, 0.05),
-            ),
-            Tip(
-                "When done labeling, save your data by selecting the Points layer\nand hitting Ctrl+S (or File > Save Selected Layer(s)...).",
-                (0.1, 0.65),
-            ),
-            Tip(
-                "Read more at <a href='https://github.com/DeepLabCut/napari-deeplabcut#usage'>napari-deeplabcut</a>",
-                (0.4, 0.4),
-            ),
-        ]
-
-        buttons = (
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Abort
-        )
-        self.button_box = QDialogButtonBox(buttons)
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-
-        vlayout = QVBoxLayout()
-        self.message = QLabel("💡\n\nLet's get started with a quick walkthrough!")
-        self.message.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
-        self.message.setOpenExternalLinks(True)
-        vlayout.addWidget(self.message)
-        hlayout = QHBoxLayout()
-        self.count = QLabel("")
-        hlayout.addWidget(self.count)
-        hlayout.addWidget(self.button_box)
-        vlayout.addLayout(hlayout)
-        self.setLayout(vlayout)
-
-    def accept(self):
-        if self._current_tip == 0 and "walkthrough" not in self.message.text():
-            self.reject()
-        tip = self._tips[self._current_tip]
-        msg = tip.msg
-        if (
-            self._current_tip < 5
-        ):  # No emoji in the last tip otherwise the hyperlink breaks
-            msg = "💡\n\n" + msg
-        self.message.setText(msg)
-        self.count.setText(f"Tip {self._current_tip + 1}|{len(self._tips)}")
-        self.adjustSize()
-        xrel, yrel = tip.pos
-        geom = self.parent().geometry()
-        p = QPoint(
-            int(geom.left() + geom.width() * xrel),
-            int(geom.top() + geom.height() * yrel),
-        )
-        self.move(p)
-        self._current_tip = (self._current_tip + 1) % len(self._tips)
-
-
-def _get_and_try_preferred_reader(
-    self,
-    dialog,
-    *args,
-):
-    try:
-        self.viewer.open(
-            dialog._current_file,
-            plugin="napari-deeplabcut",
-        )
-    except ValueError:
-        self.viewer.open(
-            dialog._current_file,
-            plugin="builtins",
-        )
-
-
-# Hack to avoid napari's silly variable type guess,
-# where property is understood as continuous if
-# there are more than 16 unique categories...
+# napari auto-sets the color cycling behavior to continuous
+# when > 16 labels are present
+# here we force it back to categorical
+# see https://github.com/napari/napari/issues/4746
 def guess_continuous(property):
     if issubclass(property.dtype.type, np.floating):
         return True
     else:
         return False
-
-
 color_manager.guess_continuous = guess_continuous
 
-
-def _paste_data(self, store):
-    """Paste only currently unannotated data."""
-    features = self._clipboard.pop("features", None)
-    if features is None:
-        return
-
-    unannotated = [
-        keypoints.Keypoint(label, id_) not in store.annotated_keypoints
-        for label, id_ in zip(features["label"], features["id"])
-    ]
-    if not any(unannotated):
-        return
-
-    new_features = features.iloc[unannotated]
-    indices_ = self._clipboard.pop("indices")
-    text_ = self._clipboard.pop("text")
-    self._clipboard = {k: v[unannotated] for k, v in self._clipboard.items()}
-    self._clipboard["features"] = new_features
-    self._clipboard["indices"] = indices_
-    if text_ is not None:
-        new_text = {
-            "string": text_["string"][unannotated],
-            "color": text_["color"],
-        }
-        self._clipboard["text"] = new_text
-
-    npoints = len(self._view_data)
-    totpoints = len(self.data)
-
-    if len(self._clipboard.keys()) > 0:
-        not_disp = self._slice_input.not_displayed
-        data = deepcopy(self._clipboard["data"])
-        offset = [
-            self._slice_indices[i] - self._clipboard["indices"][i] for i in not_disp
-        ]
-        data[:, not_disp] = data[:, not_disp] + np.array(offset)
-        self._data = np.append(self.data, data, axis=0)
-        self._shown = np.append(self.shown, deepcopy(self._clipboard["shown"]), axis=0)
-        self._size = np.append(self.size, deepcopy(self._clipboard["size"]), axis=0)
-        self._symbol = np.append(
-            self.symbol, deepcopy(self._clipboard["symbol"]), axis=0
-        )
-
-        self._feature_table.append(self._clipboard["features"])
-
-        self.text._paste(**self._clipboard["text"])
-
-        self._edge_width = np.append(
-            self.edge_width,
-            deepcopy(self._clipboard["edge_width"]),
-            axis=0,
-        )
-        self._edge._paste(
-            colors=self._clipboard["edge_color"],
-            properties=_features_to_properties(self._clipboard["features"]),
-        )
-        self._face._paste(
-            colors=self._clipboard["face_color"],
-            properties=_features_to_properties(self._clipboard["features"]),
-        )
-
-        self._selected_view = list(
-            range(npoints, npoints + len(self._clipboard["data"]))
-        )
-        self._selected_data = set(
-            range(totpoints, totpoints + len(self._clipboard["data"]))
-        )
-        self.refresh()
-
-
-# Hack to save a KeyPoints layer without showing the Save dialog
-def _save_layers_dialog(self, selected=False):
-    """Save layers (all or selected) to disk, using ``LayerList.save()``.
-    Parameters
-    ----------
-    selected : bool
-        If True, only layers that are selected in the viewer will be saved.
-        By default, all layers are saved.
-    """
-    selected_layers = list(self.viewer.layers.selection)
-    msg = ""
-    if not len(self.viewer.layers):
-        msg = "There are no layers in the viewer to save."
-    elif selected and not len(selected_layers):
-        msg = "Please select a Points layer to save."
-    if msg:
-        QMessageBox.warning(self, "Nothing to save", msg, QMessageBox.Ok)
-        return
-    if len(selected_layers) == 1 and isinstance(selected_layers[0], Points):
-        self.viewer.layers.save("", selected=True, plugin="napari-deeplabcut")
-        self.viewer.status = "Data successfully saved"
-    else:
-        dlg = QFileDialog()
-        hist = get_save_history()
-        dlg.setHistory(hist)
-        filename, _ = dlg.getSaveFileName(
-            caption=f'Save {"selected" if selected else "all"} layers',
-            dir=hist[0],  # home dir by default
-        )
-        if filename:
-            self.viewer.layers.save(filename, selected=selected)
-        else:
-            return
-    self._is_saved = True
-    self.last_saved_label.setText(
-        f'Last saved at {str(datetime.now().time()).split(".")[0]}'
-    )
-    self.last_saved_label.show()
-
-
-def on_close(self, event, widget):
-    if widget._stores and not widget._is_saved:
-        choice = QMessageBox.warning(
-            widget,
-            "Warning",
-            "Data were not saved. Are you certain you want to leave?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        if choice == QMessageBox.Yes:
-            event.accept()
-        else:
-            event.ignore()
-    else:
-        event.accept()
-
-
-# Class taken from https://github.com/matplotlib/napari-matplotlib/blob/53aa5ec95c1f3901e21dedce8347d3f95efe1f79/src/napari_matplotlib/base.py#L309
-class NapariNavigationToolbar(NavigationToolbar2QT):
-    """Custom Toolbar style for Napari."""
-
-    def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-        super().__init__(*args, **kwargs)
-        self.setIconSize(QSize(28, 28))
-
-    def _update_buttons_checked(self) -> None:
-        """Update toggle tool icons when selected/unselected."""
-        super()._update_buttons_checked()
-        icon_dir = self.parentWidget()._get_path_to_icon()
-
-        # changes pan/zoom icons depending on state (checked or not)
-        if "pan" in self._actions:
-            if self._actions["pan"].isChecked():
-                self._actions["pan"].setIcon(
-                    QIcon(os.path.join(icon_dir, "Pan_checked.png"))
-                )
-            else:
-                self._actions["pan"].setIcon(
-                    QIcon(os.path.join(icon_dir, "Pan.png"))
-                )
-        if "zoom" in self._actions:
-            if self._actions["zoom"].isChecked():
-                self._actions["zoom"].setIcon(
-                    QIcon(os.path.join(icon_dir, "Zoom_checked.png"))
-                )
-            else:
-                self._actions["zoom"].setIcon(
-                    QIcon(os.path.join(icon_dir, "Zoom.png"))
-                )
-
-
-class KeypointMatplotlibCanvas(QWidget):
-    """
-    Class about matplotlib canvas in which I will draw the keypoints over a range of frames
-    It will be at the bottom of the screen and will use the keypoints from the range of frames to plot them on a x-y time series.
-    """
-
-    def __init__(self, napari_viewer, parent=None):
-        super().__init__(parent=parent)
-
-        self.viewer = napari_viewer
-        with mplstyle.context(self.mpl_style_sheet_path):
-            self.canvas = FigureCanvas()
-            self.canvas.figure.set_layout_engine("constrained")
-            self.ax = self.canvas.figure.subplots()
-        self.toolbar = NapariNavigationToolbar(self.canvas, parent=self)
-        self._replace_toolbar_icons()
-        self.canvas.mpl_connect("button_press_event", self.on_doubleclick)
-        self.vline = self.ax.axvline(0, 0, 1, color="k", linestyle="--")
-        self.ax.set_xlabel("Frame")
-        self.ax.set_ylabel("Y position")
-        # Add a slot to specify the range of frames to plot
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setMinimum(50)
-        self.slider.setMaximum(10000)
-        self.slider.setValue(50)
-        self.slider.setTickPosition(QSlider.TicksBelow)
-        self.slider.setTickInterval(50)
-        self.slider_value = QLabel(str(self.slider.value()))
-        self._window = self.slider.value()
-        # Connect slider to window setter
-        self.slider.valueChanged.connect(self.set_window)
-
-        layout = QVBoxLayout()
-        layout.addWidget(self.canvas)
-        layout.addWidget(self.toolbar)
-        layout2 = QHBoxLayout()
-        layout2.addWidget(self.slider)
-        layout2.addWidget(self.slider_value)
-
-        layout.addLayout(layout2)
-        self.setLayout(layout)
-
-        self.frames = []
-        self.keypoints = []
-        self.df = None
-        # Make widget larger
-        self.setMinimumHeight(300)
-        # connect sliders to update plot
-        self.viewer.dims.events.current_step.connect(self.update_plot_range)
-
-        # Run update plot range once to initialize the plot
-        self._n = 0
-        self.update_plot_range(
-            Event(type_name="", value=[self.viewer.dims.current_step[0]])
-        )
-
-        self.viewer.layers.events.inserted.connect(self._load_dataframe)
-        self._lines = {}
-
-    def on_doubleclick(self, event):
-        if event.dblclick:
-            show = list(self._lines.values())[0][0].get_visible()
-            for lines in self._lines.values():
-                for l in lines:
-                    l.set_visible(not show)
-            self._refresh_canvas(value=self._n)
-
-    def _napari_theme_has_light_bg(self) -> bool:
-        """
-        Does this theme have a light background?
-
-        Returns
-        -------
-        bool
-            True if theme's background colour has hsl lighter than 50%, False if darker.
-        """
-        theme = napari.utils.theme.get_theme(self.viewer.theme, as_dict=False)
-        _, _, bg_lightness = theme.background.as_hsl_tuple()
-        return bg_lightness > 0.5
-
-    @property
-    def mpl_style_sheet_path(self) -> Path:
-        """
-        Path to the set Matplotlib style sheet.
-        """
-        if self._napari_theme_has_light_bg():
-            return Path(__file__).parent / "styles" / "light.mplstyle"
-        else:
-            return Path(__file__).parent / "styles" / "dark.mplstyle"
-
-    def _get_path_to_icon(self) -> Path:
-        """
-        Get the icons directory (which is theme-dependent).
-
-        Icons modified from
-        https://github.com/matplotlib/matplotlib/tree/main/lib/matplotlib/mpl-data/images
-        """
-        icon_root = Path(__file__).parent / "assets"
-        if self._napari_theme_has_light_bg():
-            return icon_root / "black"
-        else:
-            return icon_root / "white"
-
-    def _replace_toolbar_icons(self) -> None:
-        """
-        Modifies toolbar icons to match the napari theme, and add some tooltips.
-        """
-        icon_dir = self._get_path_to_icon()
-        for action in self.toolbar.actions():
-            text = action.text()
-            if text == "Pan":
-                action.setToolTip(
-                    "Pan/Zoom: Left button pans; Right button zooms; "
-                    "Click once to activate; Click again to deactivate"
-                )
-            if text == "Zoom":
-                action.setToolTip(
-                    "Zoom to rectangle; Click once to activate; "
-                    "Click again to deactivate"
-                )
-            if len(text) > 0:  # i.e. not a separator item
-                icon_path = os.path.join(icon_dir, text + ".png")
-                action.setIcon(QIcon(icon_path))
-
-    def _load_dataframe(self):
-        points_layer = None
-        for layer in self.viewer.layers:
-            if isinstance(layer, Points):
-                points_layer = layer
-                break
-
-        if points_layer is None or ~np.any(points_layer.data):
-            return
-
-        self.viewer.window.add_dock_widget(self, name="Trajectory plot", area="right")
-        self.hide()
-
-        self.df = _form_df(
-            points_layer.data,
-            {
-                "metadata": points_layer.metadata,
-                "properties": points_layer.properties,
-            },
-        )
-        for keypoint in self.df.columns.get_level_values("bodyparts").unique():
-            y = self.df.xs((keypoint, "y"), axis=1, level=["bodyparts", "coords"])
-            x = np.arange(len(y))
-            color = points_layer.metadata["face_color_cycles"]["label"][keypoint]
-            lines = self.ax.plot(x, y, color=color, label=keypoint)
-            self._lines[keypoint] = lines
-
-        self._refresh_canvas(value=self._n)
-
-    def _toggle_line_visibility(self, keypoint):
-        for artist in self._lines[keypoint]:
-            artist.set_visible(not artist.get_visible())
-        self._refresh_canvas(value=self._n)
-
-    def _refresh_canvas(self, value):
-        start = max(0, value - self._window // 2)
-        end = min(value + self._window // 2, len(self.df))
-
-        self.ax.set_xlim(start, end)
-        self.vline.set_xdata(value)
-        self.canvas.draw()
-
-    def set_window(self, value):
-        self._window = value
-        self.slider_value.setText(str(value))
-        self.update_plot_range(Event(type_name="", value=[self._n]))
-
-    def update_plot_range(self, event):
-        value = event.value[0]
-        self._n = value
-
-        if self.df is None:
-            return
-
-        self._refresh_canvas(value)
-
-
-class KeypointControls(QWidget):
-    def __init__(self, napari_viewer):
-        super().__init__()
-        self._is_saved = False
-
-        self.viewer = napari_viewer
-        self.viewer.layers.events.inserted.connect(self.on_insert)
-        self.viewer.layers.events.removed.connect(self.on_remove)
-
-        self.viewer.window.qt_viewer._get_and_try_preferred_reader = MethodType(
-            _get_and_try_preferred_reader,
-            self.viewer.window.qt_viewer,
-        )
-
-        status_bar = self.viewer.window._qt_window.statusBar()
-        self.last_saved_label = QLabel("")
-        self.last_saved_label.hide()
-        status_bar.addPermanentWidget(self.last_saved_label)
-
-        # Hack napari's Welcome overlay to show more relevant instructions
-        overlay = self.viewer.window._qt_viewer._welcome_widget
-        welcome_widget = overlay.layout().itemAt(1).widget()
-        welcome_widget.deleteLater()
-        w = QtWelcomeWidget(None)
-        overlay._overlay = w
-        overlay.addWidget(w)
-        overlay._overlay.sig_dropped.connect(overlay.sig_dropped)
-
-        self._label_mode = keypoints.LabelMode.default()
-
-        # Hold references to the KeypointStores
-        self._stores = {}
-        # Intercept close event if data were not saved
-        self.viewer.window._qt_window.closeEvent = partial(
-            on_close,
-            self.viewer.window._qt_window,
-            widget=self,
-        )
-
-        # Storage for extra image metadata that are relevant to other layers.
-        # These are updated anytime images are added to the Viewer
-        # and passed on to the other layers upon creation.
-        self._images_meta = dict()
-
-        # Add some more controls
-        self._layout = QVBoxLayout(self)
-        self._menus = []
-
-        self._video_group = self._form_video_action_menu()
-        self.video_widget = self.viewer.window.add_dock_widget(
-            self._video_group, name="video", area="right"
-        )
-        self.video_widget.setVisible(False)
-
-        hlayout = QHBoxLayout()
-        trail_label = QLabel("Show trails")
-        self._trail_cb = QCheckBox()
-        self._trail_cb.setToolTip("toggle trails visibility")
-        self._trail_cb.setChecked(False)
-        self._trail_cb.setEnabled(False)
-        self._trail_cb.stateChanged.connect(self._show_trails)
-        self._trails = None
-
-        matplotlib_label = QLabel("Show matplotlib canvas")
-        self._matplotlib_canvas = KeypointMatplotlibCanvas(self.viewer)
-        self._matplotlib_cb = QCheckBox()
-        self._matplotlib_cb.setToolTip("toggle matplotlib canvas visibility")
-        self._matplotlib_cb.stateChanged.connect(self._show_matplotlib_canvas)
-        self._matplotlib_cb.setChecked(False)
-        self._matplotlib_cb.setEnabled(False)
-        self._view_scheme_cb = QCheckBox("Show color scheme", parent=self)
-
-        hlayout.addWidget(self._matplotlib_cb)
-        hlayout.addWidget(matplotlib_label)
-        hlayout.addWidget(self._trail_cb)
-        hlayout.addWidget(trail_label)
-        hlayout.addWidget(self._view_scheme_cb)
-
-        self._layout.addLayout(hlayout)
-
-        self._radio_group = self._form_mode_radio_buttons()
-
-        self._display = ColorSchemeDisplay(parent=self)
-        self._color_scheme_display = self._form_color_scheme_display(self.viewer)
-        self._view_scheme_cb.toggled.connect(self._show_color_scheme)
-        self._view_scheme_cb.toggle()
-        self._display.added.connect(
-            lambda w: w.part_label.clicked.connect(
-                self._matplotlib_canvas._toggle_line_visibility
-            ),
-        )
-
-        # Substitute default menu action with custom one
-        for action in self.viewer.window.file_menu.actions()[::-1]:
-            action_name = action.text().lower()
-            if "save selected layer" in action_name:
-                action.triggered.disconnect()
-                action.triggered.connect(
-                    lambda: _save_layers_dialog(
-                        self,
-                        selected=True,
-                    )
-                )
-            elif "save all layers" in action_name:
-                self.viewer.window.file_menu.removeAction(action)
-
-        # Add action to show the walkthrough again
-        launch_tutorial = QAction("&Launch Tutorial", self)
-        launch_tutorial.triggered.connect(self.start_tutorial)
-        self.viewer.window.view_menu.addAction(launch_tutorial)
-
-        # Add action to view keyboard shortcuts
-        display_shortcuts_action = QAction("&Shortcuts", self)
-        display_shortcuts_action.triggered.connect(self.display_shortcuts)
-        self.viewer.window.help_menu.addAction(display_shortcuts_action)
-
-        # Hide some unused viewer buttons
-        self.viewer.window._qt_viewer.viewerButtons.gridViewButton.hide()
-        self.viewer.window._qt_viewer.viewerButtons.rollDimsButton.hide()
-        self.viewer.window._qt_viewer.viewerButtons.transposeDimsButton.hide()
-        self.viewer.window._qt_viewer.layerButtons.newPointsButton.setDisabled(True)
-        self.viewer.window._qt_viewer.layerButtons.newLabelsButton.setDisabled(True)
-
-        if self.settings.value("first_launch", True) and not os.environ.get(
-            "hide_tutorial", False
-        ):
-            QTimer.singleShot(10, self.start_tutorial)
-            self.settings.setValue("first_launch", False)
-
-    @cached_property
-    def settings(self):
-        return QSettings()
-
-    def start_tutorial(self):
-        Tutorial(self.viewer.window._qt_window.current()).show()
-
-    def display_shortcuts(self):
-        Shortcuts(self.viewer.window._qt_window.current()).show()
-
-    def _move_image_layer_to_bottom(self, index):
-        if (ind := index) != 0:
-            self.viewer.layers.move_selected(ind, 0)
-            self.viewer.layers.select_next()  # Auto-select the Points layer
-
-    def _show_color_scheme(self):
-        show = self._view_scheme_cb.isChecked()
-        self._color_scheme_display.setVisible(show)
-
-    def _show_trails(self, state):
-        if state == Qt.Checked:
-            if self._trails is None:
-                store = list(self._stores.values())[0]
-                inds = encode_categories(store.layer.properties["label"])
-                temp = np.c_[inds, store.layer.data]
-                cmap = "viridis"
-                for layer in self.viewer.layers:
-                    if isinstance(layer, Points) and layer.metadata:
-                        cmap = layer.metadata["colormap_name"]
-                self._trails = self.viewer.add_tracks(
-                    temp,
-                    tail_length=50,
-                    head_length=50,
-                    tail_width=6,
-                    name="trails",
-                    colormap=cmap,
-                )
-            self._trails.visible = True
-        elif self._trails is not None:
-            self._trails.visible = False
-
-    def _show_matplotlib_canvas(self, state):
-        if state == Qt.Checked:
-            self._matplotlib_canvas.show()
-        else:
-            self._matplotlib_canvas.hide()
-
-    def _form_video_action_menu(self):
-        group_box = QGroupBox("Video")
-        layout = QVBoxLayout()
-        extract_button = QPushButton("Extract frame")
-        extract_button.clicked.connect(self._extract_single_frame)
-        layout.addWidget(extract_button)
-        crop_button = QPushButton("Store crop coordinates")
-        crop_button.clicked.connect(self._store_crop_coordinates)
-        layout.addWidget(crop_button)
-        group_box.setLayout(layout)
-        return group_box
-
-    def _extract_single_frame(self, *args):
-        image_layer = None
-        points_layer = None
-        for layer in self.viewer.layers:
-            if isinstance(layer, Image):
-                image_layer = layer
-            elif isinstance(layer, Points):
-                points_layer = layer
-        if image_layer is not None:
-            ind = self.viewer.dims.current_step[0]
-            frame = image_layer.data[ind]
-            n_frames = image_layer.data.shape[0]
-            name = f"img{str(ind).zfill(int(ceil(log10(n_frames))))}.png"
-            output_path = os.path.join(image_layer.metadata["root"], name)
-            _write_image(frame, str(output_path))
-
-            # If annotations were loaded, they should be written to a machinefile.h5 file
-            if points_layer is not None:
-                df = _form_df(
-                    points_layer.data,
-                    {
-                        "metadata": points_layer.metadata,
-                        "properties": points_layer.properties,
-                    },
-                )
-                df = df.iloc[ind : ind + 1]
-                df.index = pd.MultiIndex.from_tuples([Path(output_path).parts[-3:]])
-                filepath = os.path.join(
-                    image_layer.metadata["root"], "machinelabels-iter0.h5"
-                )
-                if Path(filepath).is_file():
-                    df_prev = pd.read_hdf(filepath)
-                    guarantee_multiindex_rows(df_prev)
-                    df = pd.concat([df_prev, df])
-                    df = df[~df.index.duplicated(keep="first")]
-                df.to_hdf(filepath, key="machinelabels")
-
-    def _store_crop_coordinates(self, *args):
-        if not (project_path := self._images_meta.get("project")):
-            return
-        for layer in self.viewer.layers:
-            if isinstance(layer, Shapes):
-                try:
-                    ind = layer.shape_type.index("rectangle")
-                except ValueError:
-                    return
-                bbox = layer.data[ind][:, 1:]
-                h = self.viewer.dims.range[2][1]
-                bbox[:, 0] = h - bbox[:, 0]
-                bbox = np.clip(bbox, 0, a_max=None).astype(int)
-                y1, x1 = bbox.min(axis=0)
-                y2, x2 = bbox.max(axis=0)
-                temp = {"crop": ", ".join(map(str, [x1, x2, y1, y2]))}
-                config_path = os.path.join(project_path, "config.yaml")
-                cfg = _load_config(config_path)
-                cfg["video_sets"][
-                    os.path.join(project_path, "videos", self._images_meta["name"])
-                ] = temp
-                _write_config(config_path, cfg)
-                break
-
-    def _form_dropdown_menus(self, store):
-        menu = KeypointsDropdownMenu(store)
-        self.viewer.dims.events.current_step.connect(
-            menu.smart_reset,
-            position="last",
-        )
-        menu.smart_reset(event=None)
-        self._menus.append(menu)
-        layout = QVBoxLayout()
-        layout.addWidget(menu)
-        self._layout.addLayout(layout)
-
-    def _form_mode_radio_buttons(self):
-        group_box = QGroupBox("Labeling mode")
-        layout = QHBoxLayout()
-        group = QButtonGroup(self)
-        for i, mode in enumerate(keypoints.LabelMode.__members__, start=1):
-            btn = QRadioButton(mode.lower())
-            btn.setToolTip(keypoints.TOOLTIPS[mode])
-            group.addButton(btn, i)
-            layout.addWidget(btn)
-        group.button(1).setChecked(True)
-        group_box.setLayout(layout)
-        self._layout.addWidget(group_box)
-
-        def _func():
-            self.label_mode = group.checkedButton().text()
-
-        group.buttonClicked.connect(_func)
-        return group
-
-    def _form_color_scheme_display(self, viewer):
-        self.viewer.layers.events.inserted.connect(self._update_color_scheme)
-        return viewer.window.add_dock_widget(
-            self._display, name="Color scheme reference", area="left"
-        )
-
-    def _update_color_scheme(self):
-        def to_hex(nparray):
-            a = np.array(nparray * 255, dtype=int)
-            rgb2hex = lambda r, g, b, _: f"#{r:02x}{g:02x}{b:02x}"
-            res = rgb2hex(*a)
-            return res
-
-        self._display.reset()
-        for layer in self.viewer.layers:
-            if isinstance(layer, Points) and layer.metadata:
-                [
-                    self._display.add_entry(name, to_hex(color))
-                    for name, color in layer.metadata["face_color_cycles"][
-                        "label"
-                    ].items()
-                ]
-                break
-
-    def _remap_frame_indices(self, layer):
-        if not self._images_meta.get("paths"):
-            return
-
-        new_paths = [to_os_dir_sep(p) for p in self._images_meta["paths"]]
-        paths = layer.metadata.get("paths")
-        if paths is not None and np.any(layer.data):
-            paths_map = dict(zip(range(len(paths)), map(to_os_dir_sep, paths)))
-            # Discard data if there are missing frames
-            missing = [i for i, path in paths_map.items() if path not in new_paths]
-            if missing:
-                if isinstance(layer.data, list):
-                    inds_to_remove = [
-                        i
-                        for i, verts in enumerate(layer.data)
-                        if verts[0, 0] in missing
-                    ]
-                else:
-                    inds_to_remove = np.flatnonzero(np.isin(layer.data[:, 0], missing))
-                layer.selected_data = inds_to_remove
-                layer.remove_selected()
-                for i in missing:
-                    paths_map.pop(i)
-
-            # Check now whether there are new frames
-            temp = {k: new_paths.index(v) for k, v in paths_map.items()}
-            data = layer.data
-            if isinstance(data, list):
-                for verts in data:
-                    verts[:, 0] = np.vectorize(temp.get)(verts[:, 0])
-            else:
-                data[:, 0] = np.vectorize(temp.get)(data[:, 0])
-            layer.data = data
-        layer.metadata.update(self._images_meta)
-
-    def on_insert(self, event):
-        layer = event.source[-1]
-        if isinstance(layer, Image):
-            paths = layer.metadata.get("paths")
-            if paths is None:  # Then it's a video file
-                self.video_widget.setVisible(True)
-            # Store the metadata and pass them on to the other layers
-            self._images_meta.update(
-                {
-                    "paths": paths,
-                    "shape": layer.level_shapes[0],
-                    "root": layer.metadata["root"],
-                    "name": layer.name,
-                }
-            )
-            # Delay layer sorting
-            QTimer.singleShot(
-                10, partial(self._move_image_layer_to_bottom, event.index)
-            )
-        elif isinstance(layer, Points):
-            # If the current Points layer comes from a config file, some have already
-            # been added and the body part names are different from the existing ones,
-            # then we update store's metadata and menus.
-            if layer.metadata.get("project", "") and self._stores:
-                new_metadata = layer.metadata.copy()
-
-                keypoints_menu = self._menus[0].menus["label"]
-                current_keypoint_set = set(
-                    keypoints_menu.itemText(i) for i in range(keypoints_menu.count())
-                )
-                new_keypoint_set = set(new_metadata["header"].bodyparts)
-                diff = new_keypoint_set.difference(current_keypoint_set)
-                if diff:
-                    answer = QMessageBox.question(
-                        self, "", "Do you want to display the new keypoints only?"
-                    )
-                    if answer == QMessageBox.Yes:
-                        self.viewer.layers[-2].shown = False
-
-                    self.viewer.status = f"New keypoint{'s' if len(diff) > 1 else ''} {', '.join(diff)} found."
-                    for _layer, store in self._stores.items():
-                        _layer.metadata["header"] = new_metadata["header"]
-                        store.layer = _layer
-
-                    for menu in self._menus:
-                        menu._map_individuals_to_bodyparts()
-                        menu._update_items()
-
-                # Remove the unnecessary layer newly added
-                QTimer.singleShot(10, self.viewer.layers.pop)
-
-                # Always update the colormap to reflect the one in the config.yaml file
-                for _layer, store in self._stores.items():
-                    _layer.metadata["face_color_cycles"] = new_metadata[
-                        "face_color_cycles"
-                    ]
-                    _layer.face_color = "label"
-                    _layer.face_color_cycle = new_metadata["face_color_cycles"][
-                        "label"
-                    ]
-                    _layer.events.face_color()
-                    store.layer = _layer
-                self._update_color_scheme()
-
-                return
-
-            store = keypoints.KeypointStore(self.viewer, layer)
-            self._stores[layer] = store
-            # TODO Set default dir of the save file dialog
-            if root := layer.metadata.get("root"):
-                update_save_history(root)
-            layer.metadata["controls"] = self
-            layer.text.visible = False
-            layer.bind_key("M", self.cycle_through_label_modes)
-            func = partial(_paste_data, store=store)
-            layer._paste_data = MethodType(func, layer)
-            layer.add = MethodType(keypoints._add, store)
-            layer.events.add(query_next_frame=Event)
-            layer.events.query_next_frame.connect(store._advance_step)
-            layer.bind_key("Shift-Right", store._find_first_unlabeled_frame)
-            layer.bind_key("Shift-Left", store._find_first_unlabeled_frame)
-
-            layer.bind_key("Down", store.next_keypoint, overwrite=True)
-            layer.bind_key("Up", store.prev_keypoint, overwrite=True)
-            layer.face_color_mode = "cycle"
-            if not self._menus:
-                self._form_dropdown_menus(store)
-            self._images_meta.update(
-                {
-                    "project": layer.metadata.get("project"),
-                }
-            )
-            self._trail_cb.setEnabled(True)
-            self._matplotlib_cb.setEnabled(True)
-
-            # Hide the color pickers, as colormaps are strictly defined by users
-            controls = self.viewer.window.qt_viewer.dockLayerControls
-            point_controls = controls.widget().widgets[layer]
-            point_controls.faceColorEdit.hide()
-            point_controls.edgeColorEdit.hide()
-            point_controls.layout().itemAt(9).widget().hide()
-            point_controls.layout().itemAt(11).widget().hide()
-            # Hide out of slice checkbox
-            point_controls.outOfSliceCheckBox.hide()
-            point_controls.layout().itemAt(15).widget().hide()
-            # Add dropdown menu for colormap picking
-            colormap_selector = DropdownMenu(plt.colormaps, self)
-            colormap_selector.update_to(layer.metadata["colormap_name"])
-            colormap_selector.currentTextChanged.connect(self._update_colormap)
-            point_controls.layout().addRow("colormap", colormap_selector)
-
-        for layer_ in self.viewer.layers:
-            if not isinstance(layer_, Image):
-                self._remap_frame_indices(layer_)
-
-    def on_remove(self, event):
-        layer = event.value
-        n_points_layer = sum(isinstance(l, Points) for l in self.viewer.layers)
-        if isinstance(layer, Points) and n_points_layer == 0:
-            if self._color_scheme_display is not None:
-                self._display.reset()
-            self._stores.pop(layer, None)
-            while self._menus:
-                menu = self._menus.pop()
-                self._layout.removeWidget(menu)
-                menu.deleteLater()
-                menu.destroy()
-            self._trail_cb.setEnabled(False)
-            self._matplotlib_cb.setEnabled(False)
-            self.last_saved_label.hide()
-        elif isinstance(layer, Image):
-            self._images_meta = dict()
-            paths = layer.metadata.get("paths")
-            if paths is None:
-                self.video_widget.setVisible(False)
-        elif isinstance(layer, Tracks):
-            self._trail_cb.setChecked(False)
-            self._matplotlib_cb.setChecked(False)
-            self._trails = None
-
-    def _update_colormap(self, colormap_name):
-        for layer in self.viewer.layers:
-            if isinstance(layer, Points) and layer.metadata:
-                face_color_cycle_maps = build_color_cycles(
-                    layer.metadata["header"], colormap_name,
-                )
-                layer.metadata["face_color_cycles"] = face_color_cycle_maps
-                face_color_prop = layer._face.color_properties.name
-                layer.face_color = face_color_prop
-                layer.face_color_cycle = face_color_cycle_maps[face_color_prop]
-                layer.events.face_color()
-                self._update_color_scheme()
-                break
-
-    @register_points_action("Change labeling mode")
-    def cycle_through_label_modes(self, *args):
-        self.label_mode = next(keypoints.LabelMode)
-
-    @property
-    def label_mode(self):
-        return str(self._label_mode)
-
-    @label_mode.setter
-    def label_mode(self, mode: Union[str, keypoints.LabelMode]):
-        self._label_mode = keypoints.LabelMode(mode)
-        self.viewer.status = self.label_mode
-        mode_ = str(mode)
-        if mode_ == "loop":
-            for menu in self._menus:
-                menu._locked = True
-        else:
-            for menu in self._menus:
-                menu._locked = False
-        for btn in self._radio_group.buttons():
-            if btn.text() == mode_:
-                btn.setChecked(True)
-                break
-
-
-@Points.bind_key("F")
-def toggle_face_color(layer):
-    if layer._face.color_properties.name == "id":
-        layer.face_color = "label"
-        layer.face_color_cycle = layer.metadata["face_color_cycles"]["label"]
-    else:
-        layer.face_color = "id"
-        layer.face_color_cycle = layer.metadata["face_color_cycles"]["id"]
-    layer.events.face_color()
-
-
-@Points.bind_key("E")
-def toggle_edge_color(layer):
-    # Trick to toggle between 0 and 2
-    layer.edge_width = np.bitwise_xor(layer.edge_width, 2)
-
+@dataclass
+class QtBlocker:
+    obj: QObject
+
+    def __enter__(self):
+        self.obj.blockSignals(True)
+
+    def __exit__(self, *exception_args):
+        self.obj.blockSignals(False)
+        return False # pass exception through
 
 class DropdownMenu(QComboBox):
-    def __init__(self, labels: Sequence[str], parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.update_items(labels)
+    def __init__(self, labels: Sequence[str], placeholder: Optional[str] = None):
+        super().__init__()
+        self.set_items(labels, placeholder)
+
+    def current(self):
+        if self.currentIndex() >= 0:
+            return self.currentText()
+        else:
+            return None
+
+    def update_placeholder(self, text: str):
+        if text is not None:
+            self.setPlaceholderText(text)
 
     def update_to(self, text: str):
         index = self.findText(text)
         if index >= 0:
             self.setCurrentIndex(index)
 
+    def unselect(self):
+        self.setCurrentIndex(-1)
+
     def reset(self):
         self.setCurrentIndex(0)
 
-    def update_items(self, items):
+    def get_items(self, start_at_current = False):
+        idx = deque(list(range(self.count())))
+        current = self.currentIndex()
+        if start_at_current and current >= 0:
+            idx.rotate(-current)
+
+        return [self.itemText(i) for i in idx]
+
+    def set_items(self, items, placeholder = None):
         self.clear()
         self.addItems(items)
+        self.update_placeholder(placeholder)
 
+    def blocked(self):
+        return QtBlocker(self)
 
-class KeypointsDropdownMenu(QWidget):
-    def __init__(
-        self,
-        store: keypoints.KeypointStore,
-        parent: Optional[QWidget] = None,
-    ):
-        super().__init__(parent)
-        self.store = store
-        self.store.layer.events.current_properties.connect(self.update_menus)
-        self._locked = False
+class ControllerState(EventedModel):
+    current_point: Optional[Keypoint] = None
+    label_mode: LabelMode = LabelMode.default()
 
-        self.id2label = defaultdict(list)
-        self.menus = dict()
-        self._map_individuals_to_bodyparts()
-        self._populate_menus()
+class Controller(QWidget):
+    def __init__(self, napari_viewer):
+        super().__init__()
+        self.viewer = napari_viewer
+        # self._state = ControllerState()
+        # build layout
+        self._layout = QVBoxLayout(self)
 
-        layout1 = QVBoxLayout()
-        layout1.addStretch(1)
-        group_box = QGroupBox("Keypoint selection")
-        layout2 = QVBoxLayout()
-        for menu in self.menus.values():
-            layout2.addWidget(menu)
-        group_box.setLayout(layout2)
-        layout1.addWidget(group_box)
-        self.setLayout(layout1)
-
-    def _map_individuals_to_bodyparts(self):
-        self.id2label.clear()  # Empty dict so entries are ordered as in the config
-        for keypoint in self.store._keypoints:
-            label = keypoint.label
-            id_ = keypoint.id
-            if label not in self.id2label[id_]:
-                self.id2label[id_].append(label)
-
-    def _populate_menus(self):
-        id_ = self.store.ids[0]
-        if id_:
-            menu = create_dropdown_menu(self.store, list(self.id2label), "id")
-            menu.currentTextChanged.connect(self.refresh_label_menu)
-            self.menus["id"] = menu
-        self.menus["label"] = create_dropdown_menu(
-            self.store,
-            self.id2label[id_],
-            "label",
-        )
-
-    def _update_items(self):
-        id_ = self.store.ids[0]
-        if id_:
-            self.menus["id"].update_items(list(self.id2label))
-        self.menus["label"].update_items(self.id2label[id_])
-
-    def update_menus(self, event):
-        keypoint = self.store.current_keypoint
-        for attr, menu in self.menus.items():
-            val = getattr(keypoint, attr)
-            if menu.currentText() != val:
-                menu.update_to(val)
-
-    def refresh_label_menu(self, text: str):
-        menu = self.menus["label"]
-        menu.blockSignals(True)
-        menu.clear()
-        menu.blockSignals(False)
-        menu.addItems(self.id2label[text])
-
-    def smart_reset(self, event):
-        """Set current keypoint to the first unlabeled one."""
-        if self._locked:  # The currently selected point is not updated
-            return
-        unannotated = ""
-        already_annotated = self.store.annotated_keypoints
-        for keypoint in self.store._keypoints:
-            if keypoint not in already_annotated:
-                unannotated = keypoint
-                break
-        self.store.current_keypoint = (
-            unannotated if unannotated else self.store._keypoints[0]
-        )
-
-
-def create_dropdown_menu(store, items, attr):
-    menu = DropdownMenu(items)
-
-    def item_changed(ind):
-        current_item = menu.itemText(ind)
-        if current_item is not None:
-            setattr(store, f"current_{attr}", current_item)
-
-    menu.currentIndexChanged.connect(item_changed)
-    return menu
-
-
-# WelcomeWidget modified from:
-# https://github.com/napari/napari/blob/a72d512972a274380645dae16b9aa93de38c3ba2/napari/_qt/widgets/qt_welcome.py#L28
-class QtWelcomeWidget(QWidget):
-    """Welcome widget to display initial information and shortcuts to user."""
-
-    sig_dropped = Signal("QEvent")
-
-    def __init__(self, parent):
-        super().__init__(parent)
-
-        # Create colored icon using theme
-        self._image = QLabel()
-        self._image.setObjectName("logo_silhouette")
-        self._image.setMinimumSize(300, 300)
-        self._label = QtWelcomeLabel(
-            """
-            Drop a folder from within a DeepLabCut's labeled-data directory,
-            and,  if labeling from scratch,
-            the corresponding project's config.yaml file.
-            """
-        )
-
-        # Widget setup
-        self.setAutoFillBackground(True)
-        self.setAcceptDrops(True)
-        self._image.setAlignment(Qt.AlignCenter)
-        self._label.setAlignment(Qt.AlignCenter)
-
-        # Layout
-        text_layout = QVBoxLayout()
-        text_layout.addWidget(self._label)
-
-        layout = QVBoxLayout()
-        layout.addStretch()
-        layout.setSpacing(30)
-        layout.addWidget(self._image)
-        layout.addLayout(text_layout)
-        layout.addStretch()
-
-        self.setLayout(layout)
-
-    def paintEvent(self, event):
-        """Override Qt method.
-
-        Parameters
-        ----------
-        event : qtpy.QtCore.QEvent
-            Event from the Qt context.
-        """
-        option = QStyleOption()
-        option.initFrom(self)
-        p = QPainter(self)
-        self.style().drawPrimitive(QStyle.PE_Widget, option, p, self)
-
-    def _update_property(self, prop, value):
-        """Update properties of widget to update style.
-
-        Parameters
-        ----------
-        prop : str
-            Property name to update.
-        value : bool
-            Property value to update.
-        """
-        self.setProperty(prop, value)
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-    def dragEnterEvent(self, event):
-        """Override Qt method.
-
-        Provide style updates on event.
-
-        Parameters
-        ----------
-        event : qtpy.QtCore.QEvent
-            Event from the Qt context.
-        """
-        self._update_property("drag", True)
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
-
-    def dragLeaveEvent(self, event):
-        """Override Qt method.
-
-        Provide style updates on event.
-
-        Parameters
-        ----------
-        event : qtpy.QtCore.QEvent
-            Event from the Qt context.
-        """
-        self._update_property("drag", False)
-
-    def dropEvent(self, event):
-        """Override Qt method.
-
-        Provide style updates on event and emit the drop event.
-
-        Parameters
-        ----------
-        event : qtpy.QtCore.QEvent
-            Event from the Qt context.
-        """
-        self._update_property("drag", False)
-        self.sig_dropped.emit(event)
-
-
-class ClickableLabel(QLabel):
-    clicked = Signal(str)
-
-    def __init__(self, text="", color="turquoise", parent=None):
-        super().__init__(text, parent)
-        self._default_style = self.styleSheet()
-        self.color = color
-
-    def mousePressEvent(self, event):
-        self.clicked.emit(self.text())
-
-    def enterEvent(self, event):
-        self.setCursor(QCursor(Qt.PointingHandCursor))
-        self.setStyleSheet(f"color: {self.color}")
-
-    def leaveEvent(self, event):
-        self.unsetCursor()
-        self.setStyleSheet(self._default_style)
-
-
-class LabelPair(QWidget):
-    def __init__(self, color: str, name: str, parent: QWidget):
-        super().__init__(parent)
-
-        self._color = color
-        self._part_name = name
-
-        self.color_label = QLabel("", parent=self)
-        self.part_label = ClickableLabel(name, color=color, parent=self)
-
-        self.color_label.setToolTip(name)
-        self.part_label.setToolTip(name)
-
-        self._format_label(self.color_label, 10, 10)
-        self._format_label(self.part_label)
-
-        self.color_label.setStyleSheet(f"background-color: {color};")
-
-        self._build()
-
-    @staticmethod
-    def _format_label(label: QLabel, height: int = None, width: int = None):
-        label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        if height is not None:
-            label.setMaximumHeight(height)
-        if width is not None:
-            label.setMaximumWidth(width)
-
-    def _build(self):
+        # add labeling mode radio buttons
+        label_groupbox = QGroupBox("Labeling mode")
         layout = QHBoxLayout()
-        layout.addWidget(self.color_label, alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(self.part_label, alignment=Qt.AlignmentFlag.AlignLeft)
-        self.setLayout(layout)
+        self._label_mode = QButtonGroup(self)
+        for i, mode in enumerate(LabelMode.__members__, start=1):
+            btn = QRadioButton(mode.lower())
+            btn.setToolTip(LABEL_MODE_TOOLTIPS[mode])
+            self._label_mode.addButton(btn, i)
+            layout.addWidget(btn)
+        self._label_mode.button(1).setChecked(True)
+        label_groupbox.setLayout(layout)
+        self._layout.addWidget(label_groupbox)
+        # connect event handlers
+        # self._label_mode.buttonClicked.connect(self._update_label_mode)
 
-    @property
-    def color(self):
-        return self._color
+        # add id and keypoint dropdown menu
+        keypoint_groupbox = QGroupBox("Keypoint selection")
+        layout = QVBoxLayout()
+        self._id_menu = DropdownMenu([], placeholder="no points loaded")
+        self._keypoint_menu = DropdownMenu([], placeholder="no points loaded")
+        layout.addWidget(self._id_menu)
+        layout.addWidget(self._keypoint_menu)
+        keypoint_groupbox.setLayout(layout)
+        self._layout.addWidget(keypoint_groupbox)
+        # connect event handlers
+        self._id_menu.currentIndexChanged.connect(self.on_idmenu_select)
+        self._keypoint_menu.currentIndexChanged.connect(self.on_pointmenu_select)
 
-    @color.setter
-    def color(self, color: str):
-        self._color = color
-        self.color_label.setStyleSheet(f"background-color: {color};")
+        # add callbacks for when layers are added/removed/selected
+        self.viewer.layers.events.inserted.connect(self.on_layer_insert)
+        self.viewer.layers.selection.events.active.connect(self.on_layer_select)
 
-    @property
-    def part_name(self):
-        return self._part_name
+        # add callbacks for when the frame changes
+        self.viewer.dims.events.current_step.connect(self.on_frame_change)
 
-    @part_name.setter
-    def part_name(self, part_name: str):
-        self._part_name = part_name
-        self.part_label.setText(part_name)
-        self.part_label.setToolTip(part_name)
-        self.color_label.setToolTip(part_name)
+    def _update_id_menu(self):
+        layer = self.viewer.layers.selection.active
+        if isinstance(layer, Points):
+            ids = layer.metadata["header"].individuals
+        else:
+            ids = None
+        with self._id_menu.blocked():
+            if ids is None:
+                self._id_menu.set_items([], "no points layer selected")
+            elif len(ids) == 1 and ids[0] == "":
+                self._id_menu.set_items([], "single individual")
+            else:
+                self._id_menu.set_items(ids, "no keypoint selected")
+            self._id_menu.unselect()
 
+    def _update_keypoint_menu(self):
+        layer = self.viewer.layers.selection.active
+        if isinstance(layer, Points):
+            bodyparts = layer.metadata["header"].bodyparts
+        else:
+            bodyparts = []
+        with self._keypoint_menu.blocked():
+            self._keypoint_menu.set_items(bodyparts, "no keypoint selected")
+            self._keypoint_menu.unselect()
 
-class ColorSchemeDisplay(QScrollArea):
-    added = Signal(object)
+    def current_frame(self):
+        return self.viewer.dims.current_step[0]
 
-    def __init__(self, parent):
-        super().__init__(parent)
+    def set_frame(self, frame):
+        frame = max(min(frame, self.viewer.dims.nsteps[0]), 0)
+        self.viewer.dims.set_current_step(0, frame)
 
-        self.scheme_dict = {}  # {name: color} mapping
-        self._layout = QVBoxLayout()
-        self._layout.setSpacing(0)
-        self._container = QWidget(
-            parent=self
-        )  # workaround to use setWidget, let me know if there's a better option
+    def current_id(self):
+        current_id = self._id_menu.current()
 
-        self._build()
+        return "" if current_id is None else current_id
 
-    @property
-    def labels(self):
-        labels = []
-        for i in range(self._layout.count()):
-            item = self._layout.itemAt(i)
-            if w := item.widget():
-                labels.append(w)
-        return labels
+    def current_keypoint(self):
+        return self._keypoint_menu.current()
 
-    def _build(self):
-        self._container.setSizePolicy(
-            QSizePolicy.Fixed, QSizePolicy.Maximum
-        )  # feel free to change those
-        self._container.setLayout(self._layout)
-        self._container.adjustSize()
+    def label_mode(self):
+        return LabelMode(self._label_mode.checkedButton().text().lower())
 
-        self.setWidget(self._container)
+    def existing_points(self, layer, ignore = None):
+        if isinstance(layer, Points):
+            idx = np.arange(layer.data.shape[0])
+            if ignore is not None:
+                ignore = np.where(ignore == -1, layer.data.shape[0] - 1, ignore)
+                idx = np.setdiff1d(idx, ignore, assume_unique=True)
 
-        self.setWidgetResizable(True)
-        self.setSizePolicy(
-            QSizePolicy.MinimumExpanding, QSizePolicy.MinimumExpanding
-        )  # feel free to change those
-        # self.setMaximumHeight(150)
-        self.setBaseSize(100, 200)
+            return ((layer.data[idx, 0] == self.current_frame()) &
+                    (layer.properties["id"][idx] == self.current_id())).nonzero()[0]
+        else:
+            raise RuntimeError("Cannot get existing points for layer of type"
+                               f"{type(layer)} (only for Points layers).")
 
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    def on_layer_insert(self, event):
+        # get the newest layer
+        layer = event.source[-1]
+        print(layer)
+        if isinstance(layer, Image):
+            # paths = layer.metadata.get("paths")
+            # # Store the metadata and pass them on to the other layers
+            # self._images_meta.update(
+            #     {
+            #         "paths": paths,
+            #         "shape": layer.level_shapes[0],
+            #         "root": layer.metadata["root"],
+            #         "name": layer.name,
+            #     }
+            # )
+            # Move the image layer to the bottom of the layer stack
+            QTimer.singleShot(10,
+                              lambda: self.viewer.layers.move_selected(event.index, 0))
+        elif isinstance(layer, Points):
+            # disable labels over keypoints
+            layer.text.visible = False
+            # add handler for when points are selected
+            layer.events.highlight.connect(self.on_point_select)
+            layer.events.mode.connect(self.on_point_mode)
+            layer.events.data.connect(self.on_point_add)
 
-    def add_entry(self, name, color):
-        self.scheme_dict.update({name: color})
+    def on_layer_select(self, _):
+        # update dropdown menus based on selected layer
+        self._update_id_menu()
+        self._update_keypoint_menu()
 
-        widget = LabelPair(color, name, self)
-        self._layout.addWidget(widget, alignment=Qt.AlignmentFlag.AlignLeft)
-        self.added.emit(widget)
+    def on_frame_change(self, _):
+        layer = self.viewer.layers.selection.active
+        if (isinstance(layer, Points) and
+            layer.mode == "add" and
+            self.label_mode() != LabelMode.LOOP):
+            self.select_next_unlabeled_point(from_start=True)
 
-    def reset(self):
-        self.scheme_dict = {}
-        for i in reversed(range(self._layout.count())):
-            w = self._layout.itemAt(i).widget()
-            w.setParent(None)
-            self._layout.removeWidget(w)
+    def on_point_mode(self, _):
+        layer = self.viewer.layers.selection.active
+        if layer.mode == "add":
+            self.select_next_unlabeled_point()
+        else:
+            self._keypoint_menu.unselect()
+
+    def on_point_add(self, event):
+        layer = self.viewer.layers.selection.active
+        if event.action == "add":
+            idx = np.asarray(event.data_indices)
+            idx = np.where(idx == -1, layer.data.shape[0] - 1, idx)
+            properties = layer.current_properties
+            current_points = self.existing_points(layer, ignore=idx)
+            current_labels = layer.properties["label"][current_points]
+            current_ids = layer.properties["id"][current_points]
+            matched_points = ((properties["label"][0] == current_labels) &
+                              (properties["id"][0] == current_ids)).nonzero()[0]
+            if np.any(matched_points):
+                if self.label_mode() == LabelMode.QUICK:
+                    layer.data[current_points[matched_points]] = layer.data[idx]
+                with layer.events.blocker_all():
+                    layer.selected_data = list(idx)
+                    layer.remove_selected()
+            full = (len(self.existing_points(layer)) ==
+                    len(self._keypoint_menu.get_items()))
+            if full or (self.label_mode() == LabelMode.LOOP):
+                self.set_frame(self.current_frame() + 1)
+            else:
+                self.select_next_unlabeled_point()
+
+    def on_point_select(self, _):
+        # get selection properties
+        layer = self.viewer.layers.selection.active
+        if layer is None or not isinstance(layer, Points) or layer.mode != "select":
+            return
+        properties = layer.current_properties
+        selection = layer.selected_data.active
+        # update the dropdowns
+        with self._id_menu.blocked(), self._keypoint_menu.blocked():
+            if selection is None:
+                self._id_menu.unselect()
+                self._keypoint_menu.unselect()
+            else:
+                if properties["id"][0] != "":
+                    self._id_menu.update_to(properties["id"][0])
+                self._keypoint_menu.update_to(properties["label"][0])
+
+    def on_idmenu_select(self, _):
+        self._keypoint_menu.unselect()
+
+    def on_pointmenu_select(self, _):
+        current_id = self.current_id()
+        current_keypoint = self.current_keypoint()
+        layer = self.viewer.layers.selection.active
+        if isinstance(layer, Points):
+            idx = ((layer.data[:, 0] == self.current_frame()) &
+                   (layer.properties["id"] == current_id) &
+                   (layer.properties["label"] == current_keypoint)).nonzero()[0]
+            if len(idx) == 1:
+                layer.selected_data = list(idx)
+            else:
+                layer.selected_data = []
+
+            if layer.mode == "add":
+                if len(idx) == 0:
+                    layer.current_properties = {
+                        "label": np.asarray([current_keypoint]),
+                        "id": np.asarray([current_id]),
+                        "likelihood": 1.0,
+                        "valid": True,
+                        "generated": False
+                    }
+
+            with layer.events.highlight.blocker():
+                # this is faster than refreshing the whole layer
+                layer.refresh()
+        else:
+            raise RuntimeError("Unknown controller state."
+                               " Keypoint menu selection triggered w/o"
+                               " a keypoint layer selected.")
+
+    def select_next_unlabeled_point(self, from_start = False):
+        layer = self.viewer.layers.selection.active
+        if isinstance(layer, Points):
+            if from_start:
+                self._keypoint_menu.reset()
+            current_points = self.existing_points(layer)
+            labels = layer.properties["label"][current_points]
+            bodyparts = self._keypoint_menu.get_items(start_at_current=True)
+            next_point = None
+            for bodypart in bodyparts:
+                if bodypart not in labels:
+                    next_point = bodypart
+                    break
+            if next_point is None:
+                self._keypoint_menu.reset()
+            else:
+                self._keypoint_menu.update_to(next_point)

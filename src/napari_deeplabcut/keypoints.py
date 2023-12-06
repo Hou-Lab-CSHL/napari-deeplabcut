@@ -55,7 +55,7 @@ class LabelMode(CycleEnum):
 
 
 # Description tooltips for the labeling modes radio buttons.
-TOOLTIPS = {
+LABEL_MODE_TOOLTIPS = {
     "SEQUENTIAL": "Points are placed in sequence, then frame after frame;\n"
     "clicking to add an already annotated point has no effect.",
     "QUICK": "Similar to SEQUENTIAL, but trying to add an already\n"
