@@ -134,7 +134,7 @@ def _populate_metadata(
             "label": list(labels),
             "id": list(ids),
             "likelihood": likelihood,
-            "valid": likelihood > pcutoff,
+            "valid": np.where(likelihood > pcutoff, "valid", "invalid"),
             "generated": np.repeat(generated, len(labels))
         },
         "shown": (likelihood > pcutoff) & ~generated,
@@ -142,8 +142,8 @@ def _populate_metadata(
         "face_color": face_color_prop,
         "face_colormap": colormap,
         "edge_color": "valid",
-        "edge_color_cycle": ["black", "red"],
-        "edge_width": 0,
+        "edge_color_cycle": {"valid": "black", "invalid": "red"},
+        "edge_width": np.zeros(len(labels)),
         "edge_width_is_relative": False,
         "size": size,
         "metadata": {
@@ -151,6 +151,8 @@ def _populate_metadata(
             "face_color_cycles": face_color_cycle_maps,
             "colormap_name": colormap,
             "paths": paths or [],
+            "confidence_thresh": pcutoff,
+            "visibility_thresh": pcutoff
         },
     }
 

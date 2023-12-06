@@ -1,24 +1,25 @@
 import numpy as np
-from dataclasses import dataclass, replace
-from collections import deque
+from dataclasses import dataclass
+from collections import deque, namedtuple
+from enum import auto
 from typing import Sequence, Optional
-from qtpy.QtCore import QObject, QTimer
+from qtpy.QtCore import QObject, QTimer, Qt
 from qtpy.QtWidgets import (QWidget,
                             QHBoxLayout,
                             QVBoxLayout,
+                            QGridLayout,
                             QGroupBox,
                             QButtonGroup,
                             QRadioButton,
-                            QComboBox)
+                            QComboBox,
+                            QSlider,
+                            QLabel)
 from napari.layers import Image, Points, Shapes, Tracks
 from napari.utils.events import EventedModel, Selection
 from napari.layers.utils import color_manager
+from napari.layers.points._points_constants import ColorMode
 
-from napari_deeplabcut.keypoints import (LabelMode,
-                                         LABEL_MODE_TOOLTIPS,
-                                         Keypoint,
-                                         KeypointStore)
-
+from napari_deeplabcut.misc import CycleEnum
 
 # napari auto-sets the color cycling behavior to continuous
 # when > 16 labels are present
@@ -30,6 +31,35 @@ def guess_continuous(property):
     else:
         return False
 color_manager.guess_continuous = guess_continuous
+
+class LabelMode(CycleEnum):
+    """
+    Labeling modes.
+    SEQUENTIAL: points are placed in sequence, then frame after frame;
+        clicking to add an already annotated point has no effect.
+    QUICK: similar to SEQUENTIAL, but trying to add an already
+        annotated point actually moves it to the cursor location.
+    LOOP: the currently selected point is placed frame after frame,
+        before wrapping at the end to frame 1, etc.
+    """
+
+    SEQUENTIAL = auto()
+    QUICK = auto()
+    LOOP = auto()
+
+    @classmethod
+    def default(cls):
+        return cls.SEQUENTIAL
+
+# Description tooltips for the labeling modes radio buttons.
+LABEL_MODE_TOOLTIPS = {
+    "SEQUENTIAL": "Points are placed in sequence, then frame after frame;\n"
+    "clicking to add an already annotated point has no effect.",
+    "QUICK": "Similar to SEQUENTIAL, but trying to add an already\n"
+    "annotated point actually moves it to the cursor location.",
+    "LOOP": "The currently selected point is placed frame after frame,\n"
+    "before wrapping at the end to frame 1, etc.",
+}
 
 @dataclass
 class QtBlocker:
@@ -84,9 +114,24 @@ class DropdownMenu(QComboBox):
     def blocked(self):
         return QtBlocker(self)
 
-class ControllerState(EventedModel):
-    current_point: Optional[Keypoint] = None
-    label_mode: LabelMode = LabelMode.default()
+class LikelihoodSlider(QSlider):
+    def __init__(self, value = 0):
+        super().__init__(Qt.Orientation.Horizontal)
+        self.setMinimum(0)
+        self.setMaximum(100)
+        self.setSingleStep(1)
+        self.set_value(value)
+
+    def value(self):
+        return super().value() / 100
+
+    def set_value(self, value):
+        assert value >= 0 and value <= 1, "LikelihoodSlider value must be in [0, 1]"
+        self.setValue(int(value * 100))
+
+# class ControllerState(EventedModel):
+#     current_point: Optional[Keypoint] = None
+#     label_mode: LabelMode = LabelMode.default()
 
 class Controller(QWidget):
     def __init__(self, napari_viewer):
@@ -110,6 +155,23 @@ class Controller(QWidget):
         self._layout.addWidget(label_groupbox)
         # connect event handlers
         # self._label_mode.buttonClicked.connect(self._update_label_mode)
+
+        # add sliders for confidence and visibility threshold
+        slider_groupbox = QGroupBox("Likelihood thresholds")
+        layout = QGridLayout()
+        label = QLabel("Highlight")
+        self._confidence_slider = LikelihoodSlider()
+        layout.addWidget(label, 0, 0, 1, 1)
+        layout.addWidget(self._confidence_slider, 0, 1, 1, 2)
+        label = QLabel("Visibility")
+        self._visibility_slider = LikelihoodSlider()
+        layout.addWidget(label, 1, 0, 1, 1)
+        layout.addWidget(self._visibility_slider, 1, 1, 1, 2)
+        slider_groupbox.setLayout(layout)
+        self._layout.addWidget(slider_groupbox)
+        # connect event handlers
+        self._confidence_slider.valueChanged.connect(self.on_confidence_change)
+        self._visibility_slider.valueChanged.connect(self.on_visibility_change)
 
         # add id and keypoint dropdown menu
         keypoint_groupbox = QGroupBox("Keypoint selection")
@@ -190,7 +252,6 @@ class Controller(QWidget):
     def on_layer_insert(self, event):
         # get the newest layer
         layer = event.source[-1]
-        print(layer)
         if isinstance(layer, Image):
             # paths = layer.metadata.get("paths")
             # # Store the metadata and pass them on to the other layers
@@ -208,6 +269,12 @@ class Controller(QWidget):
         elif isinstance(layer, Points):
             # disable labels over keypoints
             layer.text.visible = False
+            # make sure edge and face coloring works
+            layer.face_color_mode = ColorMode.CYCLE
+            layer.edge_color_mode = ColorMode.CYCLE
+            # set slider positions
+            self._confidence_slider.set_value(layer.metadata["confidence_thresh"])
+            self._visibility_slider.set_value(layer.metadata["visibility_thresh"])
             # add handler for when points are selected
             layer.events.highlight.connect(self.on_point_select)
             layer.events.mode.connect(self.on_point_mode)
@@ -224,6 +291,29 @@ class Controller(QWidget):
             layer.mode == "add" and
             self.label_mode() != LabelMode.LOOP):
             self.select_next_unlabeled_point(from_start=True)
+
+    def on_confidence_change(self, _):
+        for layer in self.viewer.layers:
+            if isinstance(layer, Points):
+                thresh = self._confidence_slider.value()
+                props = {k: v for k, v in layer.properties.items()}
+                metadata = {k: v for k, v in layer.metadata.items()}
+                metadata["confidence_thresh"] = thresh
+                valid = props["likelihood"] > thresh
+                props["valid"] = np.where(valid, "valid", "invalid")
+                layer.edge_width = np.where(valid, 0, 1)
+                layer.properties = props
+                layer.metadata = metadata
+
+    def on_visibility_change(self, _):
+        for layer in self.viewer.layers:
+            if isinstance(layer, Points):
+                thresh = self._visibility_slider.value()
+                likelihood = layer.properties["likelihood"]
+                metadata = {k: v for k, v in layer.metadata.items()}
+                metadata["visibility_thresh"] = thresh
+                layer.shown = likelihood > thresh
+                layer.metadata = metadata
 
     def on_point_mode(self, _):
         layer = self.viewer.layers.selection.active
