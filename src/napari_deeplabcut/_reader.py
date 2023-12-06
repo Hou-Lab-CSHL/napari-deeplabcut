@@ -231,7 +231,7 @@ def read_hdf(filename: str) -> List[LayerData]:
 
 def read_video(path):
     frames = VideoReaderNP(path, remove_leading_singleton=True)
-    root, file = os.path.split(path)[1]
+    root, file = os.path.split(path)
     params = {
         "name": file.split(".")[0],
         "metadata": {

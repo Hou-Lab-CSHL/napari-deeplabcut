@@ -8,8 +8,8 @@ contributions:
     - id: napari-deeplabcut.get_image_reader
       python_name: napari_deeplabcut._reader:get_image_reader
       title: Open images with napari DeepLabCut
-    - id: napari-video.get_video_reader
-      python_name: napari_video:get_napari_reader
+    - id: napari-deeplabcut.get_video_reader
+      python_name: napari_deeplabcut._reader:get_video_reader
       title: Open videos with napari DeepLabCut
     - id: napari-deeplabcut.get_folder_parser
       python_name: napari_deeplabcut._reader:get_folder_parser
@@ -33,7 +33,7 @@ contributions:
     - command: napari-deeplabcut.get_image_reader
       accepts_directories: true
       filename_patterns: ['*.png', '*.jpg', '*.jpeg']
-    - command: napari-video.get_video_reader
+    - command: napari-deeplabcut.get_video_reader
       accepts_directories: true
       filename_patterns: ['*.mp4', '*.mov', '*.avi']
     # - command: napari-deeplabcut.get_config_reader
