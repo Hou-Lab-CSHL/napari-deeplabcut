@@ -20,8 +20,6 @@ def is_latest_version():
     latest_version = json.loads(contents)["info"]["version"]
     return __version__ == latest_version, latest_version
 
-
-
 def unsorted_unique(array: Sequence) -> np.ndarray:
     """Return the unsorted unique elements of an array."""
     _, inds = np.unique(array, return_index=True)
@@ -187,6 +185,9 @@ class DLCHeader:
     @property
     def coords(self) -> List[str]:
         return self._get_unique("coords")
+
+    def is_machine_labeled(self):
+        return self.scorer.startswith("DLC_")
 
     def _get_unique(self, name: str) -> Optional[List]:
         if name in self.columns.names:

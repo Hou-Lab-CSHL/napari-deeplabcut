@@ -131,13 +131,13 @@ def _populate_metadata(
         "name": "keypoints",
         "text": "{id}–{label}" if ids[0] else "label",
         "properties": {
-            "label": list(labels),
-            "id": list(ids),
+            "label": labels,
+            "id": ids,
             "likelihood": likelihood,
             "valid": np.where(likelihood > pcutoff, "valid", "invalid"),
             "generated": np.repeat(generated, len(labels))
         },
-        "shown": (likelihood > pcutoff) & ~generated,
+        "shown": likelihood > pcutoff,
         "face_color_cycle": face_color_cycle_maps[face_color_prop],
         "face_color": face_color_prop,
         "face_colormap": colormap,
@@ -223,6 +223,7 @@ def read_hdf(filename: str) -> List[LayerData]:
             likelihood=df.get("likelihood"),
             paths=list(paths2inds),
             colormap=colormap,
+            generated=header.is_machine_labeled()
         )
         metadata["name"] = os.path.split(filename)[1].split(".")[0]
         metadata["metadata"]["root"] = os.path.split(filename)[0]

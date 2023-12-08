@@ -1,6 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
-from collections import deque, namedtuple
+from collections import deque
 from enum import auto
 from typing import Sequence, Optional
 from qtpy.QtCore import QObject, QTimer, Qt
@@ -11,13 +11,13 @@ from qtpy.QtWidgets import (QWidget,
                             QGroupBox,
                             QButtonGroup,
                             QRadioButton,
+                            QCheckBox,
                             QComboBox,
                             QSlider,
-                            QLabel)
-from napari.layers import Image, Points, Shapes, Tracks
-from napari.utils.events import EventedModel, Selection
+                            QLabel,
+                            QPushButton)
+from napari.layers import Image, Points
 from napari.layers.utils import color_manager
-from napari.layers.points._points_constants import ColorMode
 
 from napari_deeplabcut.misc import CycleEnum
 
@@ -141,6 +141,22 @@ class Controller(QWidget):
         # build layout
         self._layout = QVBoxLayout(self)
 
+        # add misc. controls
+        check_groupbox = QGroupBox("Misc. controls")
+        layout = QVBoxLayout()
+        self._show_gen_checkbox = QCheckBox("Show generated points")
+        self._show_gen_checkbox.setChecked(True)
+        layout.addWidget(self._show_gen_checkbox)
+        self._merge_machine_button = QPushButton("Merge machine labels")
+        self._merge_machine_button.setAutoDefault(False)
+        self._merge_machine_button.setEnabled(False)
+        layout.addWidget(self._merge_machine_button)
+        check_groupbox.setLayout(layout)
+        self._layout.addWidget(check_groupbox)
+        # connect event handlers
+        self._show_gen_checkbox.stateChanged.connect(self.on_visibility_change)
+        self._merge_machine_button.clicked.connect(self.merge_machine_labels)
+
         # add labeling mode radio buttons
         label_groupbox = QGroupBox("Labeling mode")
         layout = QHBoxLayout()
@@ -236,6 +252,11 @@ class Controller(QWidget):
     def label_mode(self):
         return LabelMode(self._label_mode.checkedButton().text().lower())
 
+    def has_human_labels(self, ignore = None):
+        return any(not layer.metadata["header"].is_machine_labeled()
+                   for layer in self.viewer.layers if (layer != ignore and
+                                                       isinstance(layer, Points)))
+
     def existing_points(self, layer, ignore = None):
         if isinstance(layer, Points):
             idx = np.arange(layer.data.shape[0])
@@ -248,6 +269,24 @@ class Controller(QWidget):
         else:
             raise RuntimeError("Cannot get existing points for layer of type"
                                f"{type(layer)} (only for Points layers).")
+
+    def merge_machine_labels(self, _):
+        machine_layer = self.viewer.layers.selection.active
+        delete_layer = False
+        for layer in self.viewer.layers:
+            if isinstance(layer, Points) and not layer.metadata["header"].is_machine_labeled():
+                with layer.events.data.blocker():
+                    npts = layer.data.shape[0]
+                    layer.add(machine_layer.data)
+                    properties = layer.properties
+                    for k, v in properties.items():
+                        v[npts:] = machine_layer.properties[k]
+                        properties[k] = v
+                    layer.properties = properties
+                delete_layer = True
+                layer.refresh()
+        if delete_layer:
+            self.viewer.layers.remove(machine_layer)
 
     def on_layer_insert(self, event):
         # get the newest layer
@@ -267,11 +306,14 @@ class Controller(QWidget):
             QTimer.singleShot(10,
                               lambda: self.viewer.layers.move_selected(event.index, 0))
         elif isinstance(layer, Points):
+            # we only allow a single human labels layer
+            if not layer.metadata["header"].is_machine_labeled():
+                if self.has_human_labels(ignore=layer):
+                    raise RuntimeError("Labeling tool only supports a single"
+                                       " human labeled layer!")
+
             # disable labels over keypoints
             layer.text.visible = False
-            # make sure edge and face coloring works
-            layer.face_color_mode = ColorMode.CYCLE
-            layer.edge_color_mode = ColorMode.CYCLE
             # set slider positions
             self._confidence_slider.set_value(layer.metadata["confidence_thresh"])
             self._visibility_slider.set_value(layer.metadata["visibility_thresh"])
@@ -281,9 +323,17 @@ class Controller(QWidget):
             layer.events.data.connect(self.on_point_add)
 
     def on_layer_select(self, _):
+        layer = self.viewer.layers.selection.active
         # update dropdown menus based on selected layer
         self._update_id_menu()
         self._update_keypoint_menu()
+        # if this an a machine layer, activate the merge controls
+        if (isinstance(layer, Points) and
+            layer.metadata["header"].is_machine_labeled() and
+            self.has_human_labels(ignore=layer)):
+            self._merge_machine_button.setEnabled(True)
+        else:
+            self._merge_machine_button.setEnabled(False)
 
     def on_frame_change(self, _):
         layer = self.viewer.layers.selection.active
@@ -309,10 +359,12 @@ class Controller(QWidget):
         for layer in self.viewer.layers:
             if isinstance(layer, Points):
                 thresh = self._visibility_slider.value()
+                show_gen = self._show_gen_checkbox.isChecked()
                 likelihood = layer.properties["likelihood"]
+                isgenerated = layer.properties["generated"]
                 metadata = {k: v for k, v in layer.metadata.items()}
                 metadata["visibility_thresh"] = thresh
-                layer.shown = likelihood > thresh
+                layer.shown = (likelihood > thresh) & (show_gen | ~isgenerated)
                 layer.metadata = metadata
 
     def on_point_mode(self, _):
