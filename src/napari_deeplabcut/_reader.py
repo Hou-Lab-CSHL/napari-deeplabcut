@@ -150,7 +150,7 @@ def _populate_metadata(
             "header": header,
             "face_color_cycles": face_color_cycle_maps,
             "colormap_name": colormap,
-            "paths": paths or [],
+            "paths": paths,
             "confidence_thresh": pcutoff,
             "visibility_thresh": pcutoff
         },
@@ -208,12 +208,10 @@ def read_hdf(filename: str) -> List[LayerData]:
         image_paths = df["level_0"]
         if np.issubdtype(image_paths.dtype, np.number):
             image_inds = image_paths.values
-            paths2inds = []
+            image_paths = np.asarray([])
         else:
-            image_inds, paths2inds = misc.encode_categories(
-                image_paths,
-                return_map=True,
-            )
+            image_inds = misc.encode_categories(image_paths)
+            image_paths = image_paths.values
         data[:, 0] = image_inds
         data[:, 1:] = df[["y", "x"]].to_numpy()
         metadata = _populate_metadata(
@@ -221,7 +219,7 @@ def read_hdf(filename: str) -> List[LayerData]:
             labels=df["bodyparts"],
             ids=df["individuals"],
             likelihood=df.get("likelihood"),
-            paths=list(paths2inds),
+            paths=image_paths,
             colormap=colormap,
             generated=header.is_machine_labeled()
         )

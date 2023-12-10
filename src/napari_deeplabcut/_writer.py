@@ -37,8 +37,8 @@ def _form_df(points_data, metadata):
     # Fill unannotated rows with NaNs
     # df = df.reindex(range(len(meta['paths'])))
     # df.index = meta['paths']
-    if meta["paths"]:
-        df.index = [meta["paths"][i] for i in df.index]
+    if (meta["paths"] is not None) and (len(meta["paths"]) > 0):
+        df.index = list(misc.unsorted_unique(meta["paths"]))
     misc.guarantee_multiindex_rows(df)
     return df
 

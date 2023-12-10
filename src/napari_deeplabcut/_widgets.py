@@ -234,6 +234,21 @@ class Controller(QWidget):
             self._keypoint_menu.set_items(bodyparts, "no keypoint selected")
             self._keypoint_menu.unselect()
 
+    def _set_frame_indices(self, layer):
+        if self.has_image_layer():
+            # get current order of the images
+            img_layer = next(layer for layer in self.viewer.layers if isinstance(layer, Image))
+            paths = img_layer.metadata.get("paths")
+            if paths is not None:
+                path_to_index = {p: i for i, p in enumerate(paths)}
+            else:
+                path_to_index = None
+            # apply ordering to points layer if possible
+            paths = layer.metadata.get("paths")
+            if path_to_index is not None and len(paths) > 0:
+                indices = np.vectorize(path_to_index.get)(paths)
+                layer.data[:, 0] = indices
+
     def current_frame(self):
         return self.viewer.dims.current_step[0]
 
@@ -256,6 +271,10 @@ class Controller(QWidget):
         return any(not layer.metadata["header"].is_machine_labeled()
                    for layer in self.viewer.layers if (layer != ignore and
                                                        isinstance(layer, Points)))
+
+    def has_image_layer(self, ignore = None):
+        return any(layer != ignore and isinstance(layer, Image)
+                   for layer in self.viewer.layers)
 
     def existing_points(self, layer, ignore = None):
         if isinstance(layer, Points):
@@ -283,8 +302,19 @@ class Controller(QWidget):
                         v[npts:] = machine_layer.properties[k]
                         properties[k] = v
                     layer.properties = properties
+                    metadata = {}
+                    for k, v in layer.metadata.items():
+                        if k == "paths":
+                            metadata[k] = np.concatenate([v, machine_layer.metadata["paths"]],
+                                                         axis=0)
+                        else:
+                            metadata[k] = v
+                    layer.metadata = metadata
                 delete_layer = True
                 layer.refresh()
+                # manually trigger likelihood slider callbacks
+                self.on_confidence_change(None)
+                self.on_visibility_change(None)
         if delete_layer:
             self.viewer.layers.remove(machine_layer)
 
@@ -292,16 +322,11 @@ class Controller(QWidget):
         # get the newest layer
         layer = event.source[-1]
         if isinstance(layer, Image):
-            # paths = layer.metadata.get("paths")
-            # # Store the metadata and pass them on to the other layers
-            # self._images_meta.update(
-            #     {
-            #         "paths": paths,
-            #         "shape": layer.level_shapes[0],
-            #         "root": layer.metadata["root"],
-            #         "name": layer.name,
-            #     }
-            # )
+            if self.has_image_layer(ignore=layer):
+                raise RuntimeError("Labeling tool only supports a single image layer!")
+            for other_layer in self.viewer.layers:
+                if isinstance(other_layer, Points):
+                    self._set_frame_indices(other_layer)
             # Move the image layer to the bottom of the layer stack
             QTimer.singleShot(10,
                               lambda: self.viewer.layers.move_selected(event.index, 0))
@@ -312,6 +337,8 @@ class Controller(QWidget):
                     raise RuntimeError("Labeling tool only supports a single"
                                        " human labeled layer!")
 
+            # adjust frame indices if necessary
+            self._set_frame_indices(layer)
             # disable labels over keypoints
             layer.text.visible = False
             # set slider positions
