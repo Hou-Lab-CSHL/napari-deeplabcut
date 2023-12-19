@@ -135,7 +135,8 @@ def _populate_metadata(
             "id": ids,
             "likelihood": likelihood,
             "valid": np.where(likelihood > pcutoff, "valid", "invalid"),
-            "generated": np.repeat(generated, len(labels))
+            "generated": np.repeat(generated, len(labels)),
+            "path": paths
         },
         "shown": likelihood > pcutoff,
         "face_color_cycle": face_color_cycle_maps[face_color_prop],
@@ -150,7 +151,6 @@ def _populate_metadata(
             "header": header,
             "face_color_cycles": face_color_cycle_maps,
             "colormap_name": colormap,
-            "paths": paths,
             "confidence_thresh": pcutoff,
             "visibility_thresh": pcutoff
         },
@@ -208,7 +208,7 @@ def read_hdf(filename: str) -> List[LayerData]:
         image_paths = df["level_0"]
         if np.issubdtype(image_paths.dtype, np.number):
             image_inds = image_paths.values
-            image_paths = np.asarray([])
+            image_paths = np.asarray([None for _ in range(len(image_inds))])
         else:
             image_inds = misc.encode_categories(image_paths)
             image_paths = image_paths.values

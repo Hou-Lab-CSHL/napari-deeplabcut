@@ -15,7 +15,8 @@ from qtpy.QtWidgets import (QWidget,
                             QComboBox,
                             QSlider,
                             QLabel,
-                            QPushButton)
+                            QPushButton,
+                            QMessageBox)
 from napari.layers import Image, Points
 from napari.layers.utils import color_manager
 
@@ -129,10 +130,6 @@ class LikelihoodSlider(QSlider):
         assert value >= 0 and value <= 1, "LikelihoodSlider value must be in [0, 1]"
         self.setValue(int(value * 100))
 
-# class ControllerState(EventedModel):
-#     current_point: Optional[Keypoint] = None
-#     label_mode: LabelMode = LabelMode.default()
-
 class Controller(QWidget):
     def __init__(self, napari_viewer):
         super().__init__()
@@ -209,6 +206,16 @@ class Controller(QWidget):
         # add callbacks for when the frame changes
         self.viewer.dims.events.current_step.connect(self.on_frame_change)
 
+        # disable save dialog pop up for points layer
+        # Substitute default menu action with custom one
+        for action in self.viewer.window.file_menu.actions()[::-1]:
+            action_name = action.text().lower()
+            if "save selected layer" in action_name:
+                action.triggered.disconnect()
+                action.triggered.connect(self.save_layers_dialog)
+            elif "save all layers" in action_name:
+                self.viewer.window.file_menu.removeAction(action)
+
     def _update_id_menu(self):
         layer = self.viewer.layers.selection.active
         if isinstance(layer, Points):
@@ -234,7 +241,7 @@ class Controller(QWidget):
             self._keypoint_menu.set_items(bodyparts, "no keypoint selected")
             self._keypoint_menu.unselect()
 
-    def _set_frame_indices(self, layer):
+    def _get_path_to_idx(self):
         if self.has_image_layer():
             # get current order of the images
             img_layer = next(layer for layer in self.viewer.layers if isinstance(layer, Image))
@@ -243,11 +250,19 @@ class Controller(QWidget):
                 path_to_index = {p: i for i, p in enumerate(paths)}
             else:
                 path_to_index = None
-            # apply ordering to points layer if possible
-            paths = layer.metadata.get("paths")
-            if path_to_index is not None and len(paths) > 0:
-                indices = np.vectorize(path_to_index.get)(paths)
-                layer.data[:, 0] = indices
+        else:
+            path_to_index = None
+
+        return path_to_index
+
+    def _set_frame_indices(self, layer):
+        # get current order of images
+        path_to_index = self._get_path_to_idx()
+        # apply ordering to points layer if possible
+        paths = layer.properties.get("path")
+        if path_to_index is not None and len(paths) > 0:
+            indices = np.vectorize(path_to_index.get)(paths)
+            layer.data[:, 0] = indices
 
     def current_frame(self):
         return self.viewer.dims.current_step[0]
@@ -255,6 +270,15 @@ class Controller(QWidget):
     def set_frame(self, frame):
         frame = max(min(frame, self.viewer.dims.nsteps[0]), 0)
         self.viewer.dims.set_current_step(0, frame)
+
+    def current_path(self):
+        path_to_index = self._get_path_to_idx()
+        if path_to_index is None:
+            return None
+        else:
+            index_to_path = {v: k for k, v in path_to_index.items()}
+
+            return index_to_path[self.current_frame()]
 
     def current_id(self):
         current_id = self._id_menu.current()
@@ -302,14 +326,6 @@ class Controller(QWidget):
                         v[npts:] = machine_layer.properties[k]
                         properties[k] = v
                     layer.properties = properties
-                    metadata = {}
-                    for k, v in layer.metadata.items():
-                        if k == "paths":
-                            metadata[k] = np.concatenate([v, machine_layer.metadata["paths"]],
-                                                         axis=0)
-                        else:
-                            metadata[k] = v
-                    layer.metadata = metadata
                 delete_layer = True
                 layer.refresh()
                 # manually trigger likelihood slider callbacks
@@ -317,6 +333,23 @@ class Controller(QWidget):
                 self.on_visibility_change(None)
         if delete_layer:
             self.viewer.layers.remove(machine_layer)
+
+    def save_layers_dialog(self):
+        selected_layers = list(self.viewer.layers.selection)
+        msg = ""
+        if not len(self.viewer.layers):
+            msg = "There are no layers in the viewer to save."
+        elif len(selected_layers) != 1:
+            msg = "Please select a single points layer to save."
+        elif not isinstance(selected_layers[0], Points):
+            msg = "Can only save points layers."
+        if msg:
+            QMessageBox.warning(self, "Nothing to save", msg, QMessageBox.Ok)
+
+            return
+        else:
+            self.viewer.layers.save("_dummy_name.h5", selected=True)
+            self.viewer.status = "Data successfully saved"
 
     def on_layer_insert(self, event):
         # get the newest layer
@@ -465,8 +498,10 @@ class Controller(QWidget):
                         "id": np.asarray([current_id]),
                         "likelihood": 1.0,
                         "valid": True,
-                        "generated": False
+                        "generated": False,
+                        "path": self.current_path()
                     }
+                    layer.current_edge_width = np.asarray([0])
 
             with layer.events.highlight.blocker():
                 # this is faster than refreshing the whole layer

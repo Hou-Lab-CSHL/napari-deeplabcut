@@ -24,7 +24,7 @@ def _form_df(points_data, metadata):
     meta = metadata["metadata"]
     temp["bodyparts"] = properties["label"]
     temp["individuals"] = properties["id"]
-    temp["inds"] = points_data[:, 0].astype(int)
+    temp["inds"] = properties["path"]
     temp["likelihood"] = properties["likelihood"]
     temp["scorer"] = meta["header"].scorer
     df = temp.set_index(["scorer", "individuals", "bodyparts", "inds"]).stack()
@@ -37,8 +37,6 @@ def _form_df(points_data, metadata):
     # Fill unannotated rows with NaNs
     # df = df.reindex(range(len(meta['paths'])))
     # df.index = meta['paths']
-    if (meta["paths"] is not None) and (len(meta["paths"]) > 0):
-        df.index = list(misc.unsorted_unique(meta["paths"]))
     misc.guarantee_multiindex_rows(df)
     return df
 
@@ -49,30 +47,30 @@ def write_hdf(filename, data, metadata):
     meta = metadata["metadata"]
     name = metadata["name"]
     root = meta["root"]
-    if "machine" in name:  # We are attempting to save refined model predictions
-        df.drop("likelihood", axis=1, level="coords", inplace=True, errors="ignore")
-        header = misc.DLCHeader(df.columns)
-        gt_file = ""
-        for file in os.listdir(root):
-            if file.startswith("CollectedData") and file.endswith("h5"):
-                gt_file = file
-                break
-        if gt_file:  # Refined predictions must be merged into the existing data
-            df_gt = pd.read_hdf(os.path.join(root, gt_file))
-            new_scorer = df_gt.columns.get_level_values("scorer")[0]
-            header.scorer = new_scorer
-            df.columns = header.columns
-            df = pd.concat((df, df_gt))
-            df = df[~df.index.duplicated(keep="first")]
-            name = os.path.splitext(gt_file)[0]
-        else:
-            # Let us fetch the config.yaml file to get the scorer name...
-            project_folder = Path(root).parents[1]
-            config = _load_config(str(project_folder / "config.yaml"))
-            new_scorer = config["scorer"]
-            header.scorer = new_scorer
-            df.columns = header.columns
-            name = f"CollectedData_{new_scorer}"
+    # if "machine" in name:  # We are attempting to save refined model predictions
+    #     df.drop("likelihood", axis=1, level="coords", inplace=True, errors="ignore")
+    #     header = misc.DLCHeader(df.columns)
+    #     gt_file = ""
+    #     for file in os.listdir(root):
+    #         if file.startswith("CollectedData") and file.endswith("h5"):
+    #             gt_file = file
+    #             break
+    #     if gt_file:  # Refined predictions must be merged into the existing data
+    #         df_gt = pd.read_hdf(os.path.join(root, gt_file))
+    #         new_scorer = df_gt.columns.get_level_values("scorer")[0]
+    #         header.scorer = new_scorer
+    #         df.columns = header.columns
+    #         df = pd.concat((df, df_gt))
+    #         df = df[~df.index.duplicated(keep="first")]
+    #         name = os.path.splitext(gt_file)[0]
+    #     else:
+    #         # Let us fetch the config.yaml file to get the scorer name...
+    #         project_folder = Path(root).parents[1]
+    #         config = _load_config(str(project_folder / "config.yaml"))
+    #         new_scorer = config["scorer"]
+    #         header.scorer = new_scorer
+    #         df.columns = header.columns
+    #         name = f"CollectedData_{new_scorer}"
     df.sort_index(inplace=True)
     filename = name + ".h5"
     path = os.path.join(root, filename)
