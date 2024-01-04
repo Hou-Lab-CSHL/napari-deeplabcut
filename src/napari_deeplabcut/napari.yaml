@@ -1,54 +1,54 @@
-name: napari-deeplabcut
+name: napari_deeplabcut
 display_name: napari DeepLabCut
 contributions:
   commands:
-    - id: napari-deeplabcut.get_hdf_reader
+    - id: napari_deeplabcut.get_hdf_reader
       python_name: napari_deeplabcut._reader:get_hdf_reader
       title: Open data with napari DeepLabCut
-    - id: napari-deeplabcut.get_image_reader
+    - id: napari_deeplabcut.get_image_reader
       python_name: napari_deeplabcut._reader:get_image_reader
       title: Open images with napari DeepLabCut
-    - id: napari-deeplabcut.get_video_reader
+    - id: napari_deeplabcut.get_video_reader
       python_name: napari_deeplabcut._reader:get_video_reader
       title: Open videos with napari DeepLabCut
-    - id: napari-deeplabcut.get_folder_parser
+    - id: napari_deeplabcut.get_folder_parser
       python_name: napari_deeplabcut._reader:get_folder_parser
       title: Open folder with napari DeepLabCut
-    # - id: napari-deeplabcut.get_config_reader
+    # - id: napari_deeplabcut.get_config_reader
     #   python_name: napari_deeplabcut._reader:get_config_reader
     #   title: Open config with napari DeepLabCut
-    - id: napari-deeplabcut.write_hdf
+    - id: napari_deeplabcut.write_hdf
       python_name: napari_deeplabcut._writer:write_hdf
       title: Save keypoint annotations with napari DeepLabCut
-    # - id: napari-deeplabcut.write_masks
+    # - id: napari_deeplabcut.write_masks
     #   python_name: napari_deeplabcut._writer:write_masks
     #   title: Save segmentation masks with napari DeepLabCut
-    - id: napari-deeplabcut.make_controller
+    - id: napari_deeplabcut.make_controller
       python_name: napari_deeplabcut._widgets:Controller
       title: Make main controller
   readers:
-    - command: napari-deeplabcut.get_hdf_reader
+    - command: napari_deeplabcut.get_hdf_reader
       accepts_directories: false
       filename_patterns: ['*.h5']
-    - command: napari-deeplabcut.get_image_reader
+    - command: napari_deeplabcut.get_image_reader
       accepts_directories: true
       filename_patterns: ['*.png', '*.jpg', '*.jpeg']
-    - command: napari-deeplabcut.get_video_reader
+    - command: napari_deeplabcut.get_video_reader
       accepts_directories: true
       filename_patterns: ['*.mp4', '*.mov', '*.avi']
-    # - command: napari-deeplabcut.get_config_reader
+    # - command: napari_deeplabcut.get_config_reader
     #   accepts_directories: false
     #   filename_patterns: ['*.yaml']
-    - command: napari-deeplabcut.get_folder_parser
+    - command: napari_deeplabcut.get_folder_parser
       accepts_directories: true
       filename_patterns: ['*']
   writers:
-    - command: napari-deeplabcut.write_hdf
+    - command: napari_deeplabcut.write_hdf
       layer_types: ["points{1}"]
       filename_extensions: [".h5"]
-  #   - command: napari-deeplabcut.write_masks
+  #   - command: napari_deeplabcut.write_masks
   #     layer_types: ["shapes{1}"]
   #     filename_extensions: [".csv"]
   widgets:
-    - command: napari-deeplabcut.make_controller
+    - command: napari_deeplabcut.make_controller
       display_name: Contoller
