@@ -14,9 +14,9 @@ contributions:
     - id: napari_deeplabcut.get_folder_parser
       python_name: napari_deeplabcut._reader:get_folder_parser
       title: Open folder with napari DeepLabCut
-    # - id: napari_deeplabcut.get_config_reader
-    #   python_name: napari_deeplabcut._reader:get_config_reader
-    #   title: Open config with napari DeepLabCut
+    - id: napari_deeplabcut.get_config_reader
+      python_name: napari_deeplabcut._reader:get_config_reader
+      title: Open config with napari DeepLabCut
     - id: napari_deeplabcut.write_hdf
       python_name: napari_deeplabcut._writer:write_hdf
       title: Save keypoint annotations with napari DeepLabCut
@@ -36,9 +36,9 @@ contributions:
     - command: napari_deeplabcut.get_video_reader
       accepts_directories: true
       filename_patterns: ['*.mp4', '*.mov', '*.avi']
-    # - command: napari_deeplabcut.get_config_reader
-    #   accepts_directories: false
-    #   filename_patterns: ['*.yaml']
+    - command: napari_deeplabcut.get_config_reader
+      accepts_directories: false
+      filename_patterns: ['*.yaml']
     - command: napari_deeplabcut.get_folder_parser
       accepts_directories: true
       filename_patterns: ['*']

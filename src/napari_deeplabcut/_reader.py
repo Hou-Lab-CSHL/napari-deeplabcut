@@ -118,13 +118,15 @@ def _populate_metadata(
     generated: bool = False
 ) -> Dict:
     if labels is None:
-        labels = header.bodyparts
+        labels = np.array([""])
     if ids is None:
-        ids = header.individuals
+        ids = np.array([""])
     if likelihood is None:
         likelihood = np.ones(len(labels))
     elif isinstance(likelihood, pd.Series):
         likelihood = np.asarray(likelihood.values)
+    if paths is None:
+        paths = np.array([""])
     face_color_cycle_maps = misc.build_color_cycles(header, colormap)
     face_color_prop = "id" if ids[0] else "label"
     return {
@@ -167,16 +169,15 @@ def read_config(configname: str) -> List[LayerData]:
     header = misc.DLCHeader.from_config(config)
     metadata = _populate_metadata(
         header,
-        size=config["dotsize"],
-        pcutoff=config["pcutoff"],
-        colormap=config["colormap"],
-        likelihood=np.array([1]),
+        size=config["dotsize"]
     )
     metadata["name"] = f"CollectedData_{config['scorer']}"
+    metadata["metadata"]["root"] = None
+    metadata["metadata"]["name"] = metadata["name"]
     metadata["ndim"] = 3
     metadata["property_choices"] = metadata.pop("properties")
     metadata["metadata"]["project"] = os.path.dirname(configname)
-    return [(None, metadata, "points")]
+    return [(np.empty((0, 3)), metadata, "points")]
 
 
 def read_hdf(filename: str) -> List[LayerData]:

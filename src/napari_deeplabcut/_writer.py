@@ -42,10 +42,10 @@ def _form_df(points_data, metadata):
 
 
 def write_hdf(filename, data, metadata):
-    file, _ = os.path.splitext(filename)  # FIXME Unused currently
+    selected_root = os.path.dirname(filename)
     df = _form_df(data, metadata)
     meta = metadata["metadata"]
-    name = metadata["name"]
+    name = meta["name"]
     root = meta["root"]
     # if "machine" in name:  # We are attempting to save refined model predictions
     #     df.drop("likelihood", axis=1, level="coords", inplace=True, errors="ignore")
@@ -73,7 +73,10 @@ def write_hdf(filename, data, metadata):
     #         name = f"CollectedData_{new_scorer}"
     df.sort_index(inplace=True)
     filename = name + ".h5"
-    path = os.path.join(root, filename)
+    if root is None:
+        path = os.path.join(selected_root, filename)
+    else:
+        path = os.path.join(root, filename)
     df.to_hdf(path, key="keypoints", mode="w")
     df.to_csv(path.replace(".h5", ".csv"))
     return filename

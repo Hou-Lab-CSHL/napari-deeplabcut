@@ -326,6 +326,8 @@ class Controller(QWidget):
                         v[npts:] = machine_layer.properties[k]
                         properties[k] = v
                     layer.properties = properties
+                    if layer.metadata["root"] is None:
+                        layer.metadata["root"] = machine_layer.metadata["root"]
                 delete_layer = True
                 layer.refresh()
                 # manually trigger likelihood slider callbacks
@@ -348,8 +350,12 @@ class Controller(QWidget):
 
             return
         else:
-            self.viewer.layers.save("_dummy_name.h5", selected=True)
-            self.viewer.status = "Data successfully saved"
+            if selected_layers[0].metadata["root"] is None:
+                self.viewer.window.qt_viewer._save_layers_dialog(selected=True)
+                self.viewer.status = "Data successfully saved"
+            else:
+                self.viewer.layers.save("_dummy_name.h5", selected=True)
+                self.viewer.status = "Data successfully saved"
 
     def on_layer_insert(self, event):
         # get the newest layer
