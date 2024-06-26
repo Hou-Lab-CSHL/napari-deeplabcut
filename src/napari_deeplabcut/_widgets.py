@@ -411,27 +411,29 @@ class Controller(QWidget):
     def on_confidence_change(self, _):
         for layer in self.viewer.layers:
             if isinstance(layer, Points):
-                thresh = self._confidence_slider.value()
-                props = {k: v for k, v in layer.properties.items()}
-                metadata = {k: v for k, v in layer.metadata.items()}
-                metadata["confidence_thresh"] = thresh
-                valid = props["likelihood"] > thresh
-                props["valid"] = np.where(valid, "valid", "invalid")
-                layer.edge_width = np.where(valid, 0, 1)
-                layer.properties = props
-                layer.metadata = metadata
+                if len(layer.data) > 0:
+                    thresh = self._confidence_slider.value()
+                    props = {k: v for k, v in layer.properties.items()}
+                    metadata = {k: v for k, v in layer.metadata.items()}
+                    metadata["confidence_thresh"] = thresh
+                    valid = props["likelihood"] > thresh
+                    props["valid"] = np.where(valid, "valid", "invalid")
+                    layer.edge_width = np.where(valid, 0, 1)
+                    layer.properties = props
+                    layer.metadata = metadata
 
     def on_visibility_change(self, _):
         for layer in self.viewer.layers:
             if isinstance(layer, Points):
-                thresh = self._visibility_slider.value()
-                show_gen = self._show_gen_checkbox.isChecked()
-                likelihood = layer.properties["likelihood"]
-                isgenerated = layer.properties["generated"]
-                metadata = {k: v for k, v in layer.metadata.items()}
-                metadata["visibility_thresh"] = thresh
-                layer.shown = (likelihood > thresh) & (show_gen | ~isgenerated)
-                layer.metadata = metadata
+                if len(layer.data) > 0:
+                    thresh = self._visibility_slider.value()
+                    show_gen = self._show_gen_checkbox.isChecked()
+                    likelihood = layer.properties["likelihood"]
+                    isgenerated = layer.properties["generated"]
+                    metadata = {k: v for k, v in layer.metadata.items()}
+                    metadata["visibility_thresh"] = thresh
+                    layer.shown = (likelihood > thresh) & (show_gen | ~isgenerated)
+                    layer.metadata = metadata
 
     def on_point_mode(self, _):
         layer = self.viewer.layers.selection.active
@@ -507,7 +509,7 @@ class Controller(QWidget):
                         "generated": False,
                         "path": self.current_path()
                     }
-                    layer.current_edge_width = np.asarray([0])
+                    layer.current_edge_width = 0.0
 
             with layer.events.highlight.blocker():
                 # this is faster than refreshing the whole layer

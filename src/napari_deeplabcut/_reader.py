@@ -146,7 +146,7 @@ def _populate_metadata(
         "face_colormap": colormap,
         "edge_color": "valid",
         "edge_color_cycle": {"valid": "black", "invalid": "red"},
-        "edge_width": np.zeros(len(labels)),
+        "edge_width": np.zeros(len(labels)) if ids[0] else 0.0,
         "edge_width_is_relative": False,
         "size": size,
         "metadata": {
